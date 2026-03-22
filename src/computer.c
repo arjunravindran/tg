@@ -332,10 +332,18 @@ struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int
 	s->amps_wp = 0;
 	s->trace_centering = 0;
 	s->trace_zoom = 1.0;
+	s->cal_state = 0;
+	s->cal_percent = 0;
+	s->cal_result = 0;
 	s->bph = bph;
 	s->la = la;
 	s->cal = cal;
 	s->is_light = light;
+	s->sample_rate = s->nominal_sr * (1 + (double) s->cal / (10 * 3600 * 24));
+	s->guessed_bph = s->bph ? s->bph : DEFAULT_BPH;
+	s->rate = 0;
+	s->be = 0;
+	s->amp = 0;
 
 	c = malloc(sizeof(struct computer));
 	if(!c) goto error;

@@ -529,9 +529,16 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 {
 	int i;
 	struct snapshot *snst = op->snst;
+	const int valid_events_wp =
+		snst->events &&
+		snst->events_count > 0 &&
+		snst->events_wp >= 0 &&
+		snst->events_wp < snst->events_count;
 	uint64_t time = snst->timestamp ? snst->timestamp : get_timestamp(snst->is_light);
 	double sweep;
 	double zoom_factor;
+	double safe_sample_rate = snst->sample_rate > 0 ? snst->sample_rate : snst->nominal_sr;
+	int safe_bph = snst->guessed_bph > 0 ? snst->guessed_bph : (snst->bph ? snst->bph : DEFAULT_BPH);
 	const double trace_zoom = snst->trace_zoom > 0 ? snst->trace_zoom : 1.0;
 	double slope = 1000; // detected rate: 1000 -> do not display
 	if(snst->calibrate) {
@@ -539,11 +546,13 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 		zoom_factor = PAPERSTRIP_ZOOM_CAL * trace_zoom;
 		slope = (double) snst->cal * zoom_factor / (10 * 3600 * 24);
 	} else {
-		sweep = snst->sample_rate * 3600. / snst->guessed_bph;
+		sweep = safe_sample_rate * 3600. / safe_bph;
 		zoom_factor = PAPERSTRIP_ZOOM * trace_zoom;
-		if(snst->events_count && snst->events[snst->events_wp])
+		if(valid_events_wp && snst->events[snst->events_wp])
 			slope = - snst->rate * zoom_factor / (3600. * 24.);
 	}
+	if(!isfinite(sweep) || sweep <= 0 || !isfinite(zoom_factor) || zoom_factor <= 0)
+		return FALSE;
 
 	cairo_init(c);
 
@@ -554,7 +563,7 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 	int height = temp.height;
 
 	int stopped = 0;
-	if( snst->events_count &&
+	if( valid_events_wp &&
 	    snst->events[snst->events_wp] &&
 	    time > 5 * snst->nominal_sr + snst->events[snst->events_wp]) {
 		time = 5 * snst->nominal_sr + snst->events[snst->events_wp];
@@ -604,7 +613,7 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 	cairo_stroke(c);
 
 	double now = sweep*ceil(time/sweep);
-	double ten_s = snst->sample_rate * 10 / sweep;
+	double ten_s = safe_sample_rate * 10 / sweep;
 	double last_line = fmod(now/sweep, ten_s);
 	int last_tenth = floor(now/(sweep*ten_s));
 	for(i=0;;i++) {
@@ -645,7 +654,7 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 			cairo_stroke(c);
 	}
 
-	for(i = snst->events_wp;;) {
+	for(i = snst->events_wp; valid_events_wp;) {
 		if(!snst->events_count || !snst->events[i]) break;
 		double event = now - snst->events[i] + snst->trace_centering + sweep * PAPERSTRIP_MARGIN / (2 * zoom_factor);
 		int column = floor(fmod(event, (sweep / zoom_factor)) * strip_width / (sweep / zoom_factor));
@@ -708,7 +717,7 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 
 	sprintf(s, "%.1f ms", snst->calibrate ?
 				1000. / zoom_factor :
-				3600000. / (snst->guessed_bph * zoom_factor));
+				3600000. / (safe_bph * zoom_factor));
 	cairo_text_extents(c,s,&extents);
 	cairo_move_to(c, (width - extents.x_advance)/2, height - 30);
 	cairo_show_text(c,s);
@@ -765,7 +774,9 @@ static void handle_center_trace(GtkButton *b, struct output_panel *op)
 {
 	UNUSED(b);
 	struct snapshot *snst = op->snst;
-	if(!snst || !snst->events)
+	if(!snst || !snst->events || snst->events_count <= 0)
+		return;
+	if(snst->events_wp < 0 || snst->events_wp >= snst->events_count)
 		return;
 	uint64_t last_ev = snst->events[snst->events_wp];
 	double new_centering;
@@ -779,16 +790,24 @@ static void handle_center_trace(GtkButton *b, struct output_panel *op)
 			sweep = (double) snst->nominal_sr;
 			zoom_factor = PAPERSTRIP_ZOOM_CAL * (snst->trace_zoom > 0 ? snst->trace_zoom : 1.0);
 		} else {
+			if(snst->sample_rate <= 0 || snst->guessed_bph <= 0)
+				return;
 			sweep = snst->sample_rate * 3600. / snst->guessed_bph;
 			zoom_factor = PAPERSTRIP_ZOOM * (snst->trace_zoom > 0 ? snst->trace_zoom : 1.0);
 		}
+		if(!isfinite(sweep) || sweep <= 0 || !isfinite(zoom_factor) || zoom_factor <= 0)
+			return;
 		now = sweep * ceil(time / sweep);
 		chart_width = sweep / zoom_factor;
+		if(!isfinite(now) || !isfinite(chart_width) || chart_width <= 0)
+			return;
 		new_centering = fmod(0.5 * chart_width - fmod(now - last_ev, chart_width), chart_width);
 		if(new_centering < 0)
 			new_centering += chart_width;
 	} else 
 		new_centering = 0;
+	if(!isfinite(new_centering))
+		return;
 	snst->trace_centering = new_centering;
 	gtk_widget_queue_draw(op->paperstrip_drawing_area);
 }
@@ -796,16 +815,24 @@ static void handle_center_trace(GtkButton *b, struct output_panel *op)
 static void shift_trace(struct output_panel *op, double direction)
 {
 	struct snapshot *snst = op->snst;
+	if(!snst)
+		return;
 	double chart_width;
 	double zoom_factor;
 	if(snst->calibrate) {
 		chart_width = (double) snst->nominal_sr;
 		zoom_factor = PAPERSTRIP_ZOOM_CAL * (snst->trace_zoom > 0 ? snst->trace_zoom : 1.0);
 	} else {
+		if(snst->sample_rate <= 0 || snst->guessed_bph <= 0)
+			return;
 		chart_width = snst->sample_rate * 3600. / snst->guessed_bph;
 		zoom_factor = PAPERSTRIP_ZOOM * (snst->trace_zoom > 0 ? snst->trace_zoom : 1.0);
 	}
+	if(!isfinite(chart_width) || chart_width <= 0 || !isfinite(zoom_factor) || zoom_factor <= 0)
+		return;
 	chart_width /= zoom_factor;
+	if(!isfinite(chart_width) || chart_width <= 0)
+		return;
 	snst->trace_centering = fmod(snst->trace_centering + chart_width * 0.1 * direction, chart_width);
 	if(snst->trace_centering < 0)
 		snst->trace_centering += chart_width;
