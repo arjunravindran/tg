@@ -149,8 +149,62 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 	input_parameters.hostApiSpecificStreamInfo = NULL;
 
 	err = Pa_OpenStream(&stream,&input_parameters,NULL,selected_sample_rate,paFramesPerBufferUnspecified,paNoFlag,paudio_callback,&info);
-	if(err!=paNoError)
-		goto error;
+	if(err!=paNoError) {
+		/* If opening the chosen device failed, try to find a fallback:
+		 * - On Linux with JACK running, the ALSA device may be locked;
+		 *   scan for a JACK host API device and retry.
+		 * - On macOS, CoreAudio may fail if permissions aren't granted;
+		 *   surface a specific diagnostic and fall through to the error. */
+		const PaDeviceInfo *failed_info = Pa_GetDeviceInfo(input_device);
+		PaHostApiIndex failed_host = failed_info ? failed_info->hostApi : -1;
+		const PaHostApiInfo *failed_api = (failed_host >= 0) ? Pa_GetHostApiInfo(failed_host) : NULL;
+		const char *failed_api_name = failed_api ? failed_api->name : "unknown";
+
+		debug("Pa_OpenStream failed on host API '%s': %s\n", failed_api_name, Pa_GetErrorText(err));
+
+		/* Try JACK fallback if ALSA device failed */
+		PaHostApiIndex jack_api = Pa_HostApiTypeIdToHostApiIndex(paJACK);
+		if(jack_api >= 0 && failed_api && failed_api->type == paALSA) {
+			const PaHostApiInfo *jack_info = Pa_GetHostApiInfo(jack_api);
+			if(jack_info && jack_info->defaultInputDevice != paNoDevice) {
+				PaDeviceIndex jack_device = jack_info->defaultInputDevice;
+				const PaDeviceInfo *jdi = Pa_GetDeviceInfo(jack_device);
+				if(jdi && jdi->maxInputChannels > 0) {
+					debug("ALSA device failed; retrying with JACK device %d\n", (int)jack_device);
+					long jchannels = jdi->maxInputChannels > 2 ? 2 : jdi->maxInputChannels;
+					info.channels = (int)jchannels;
+					PaStreamParameters jp;
+					jp.device = jack_device;
+					jp.channelCount = (int)jchannels;
+					jp.sampleFormat = paFloat32;
+					jp.suggestedLatency = jdi->defaultLowInputLatency;
+					jp.hostApiSpecificStreamInfo = NULL;
+					PaError jerr = Pa_OpenStream(&stream,&jp,NULL,selected_sample_rate,paFramesPerBufferUnspecified,paNoFlag,paudio_callback,&info);
+					if(jerr == paNoError) {
+						input_device = jack_device;
+						err = paNoError;
+					} else {
+						debug("JACK fallback also failed: %s\n", Pa_GetErrorText(jerr));
+						/* Restore info.channels for the primary error path */
+						info.channels = (int)channels;
+					}
+				}
+			}
+		}
+
+		if(err != paNoError) {
+			/* Emit platform-specific hint before the generic error */
+			if(failed_api && failed_api->type == paALSA)
+				error("Audio device is busy. If JACK (jackd/PipeWire-JACK) is running, "
+				      "try selecting the JACK input device from the device list or stop JACK first.");
+#ifdef __APPLE__
+			if(failed_api && failed_api->type == paCoreAudio)
+				error("Could not open audio input on macOS. Check System Settings > "
+				      "Privacy & Security > Microphone and allow access for this application.");
+#endif
+			goto error;
+		}
+	}
 
 	err = Pa_StartStream(stream);
 	if(err!=paNoError)
