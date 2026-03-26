@@ -519,7 +519,11 @@ static void handle_snapshot(GtkButton *b, struct main_window *w)
 	if(w->active_snapshot->calibrate) return;
 	struct snapshot *s = snapshot_clone(w->active_snapshot);
 	s->timestamp = get_timestamp(s->is_light);
-	add_new_tab(s, NULL, w);
+	GDateTime *dt = g_date_time_new_now_local();
+	char *name = dt ? g_date_time_format(dt, "%H:%M:%S") : NULL;
+	if(dt) g_date_time_unref(dt);
+	add_new_tab(s, name, w);
+	g_free(name);
 }
 
 static void chooser_set_filters(GtkFileChooser *chooser)
@@ -816,10 +820,7 @@ static void init_main_window(struct main_window *w)
 		gtk_entry_set_text(e,s);
 	}
 	g_signal_connect (w->bph_combo_box, "changed", G_CALLBACK(handle_bph_change), w);
-
-	// Lift angle label
-	label = gtk_label_new("lift angle");
-	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+	gtk_widget_set_tooltip_text(w->bph_combo_box, "Beats per hour of the watch movement, or 'guess' to detect automatically");
 
 	// Audio input label
 	label = gtk_label_new("audio");
@@ -865,6 +866,7 @@ static void init_main_window(struct main_window *w)
 		free_audio_input_devices(audio_devices, audio_names, audio_count);
 	}
 	g_signal_connect(w->audio_combo_box, "changed", G_CALLBACK(handle_audio_change), w);
+	gtk_widget_set_tooltip_text(w->audio_combo_box, "Audio input device");
 
 	// Sample rate label
 	label = gtk_label_new("rate");
@@ -885,12 +887,16 @@ static void init_main_window(struct main_window *w)
 			gtk_combo_box_set_active(GTK_COMBO_BOX(w->sample_rate_combo_box), 2);
 	}
 	g_signal_connect(w->sample_rate_combo_box, "changed", G_CALLBACK(handle_sample_rate_change), w);
+	gtk_widget_set_tooltip_text(w->sample_rate_combo_box, "Audio sample rate — higher values improve accuracy, lower values reduce CPU load");
 
-	// Lift angle spin button
+	// Lift angle label and spin button
+	label = gtk_label_new("lift angle");
+	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
 	w->la_spin_button = gtk_spin_button_new_with_range(MIN_LA, MAX_LA, 1);
 	gtk_box_pack_start(GTK_BOX(hbox), w->la_spin_button, FALSE, FALSE, 0);
 	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->la_spin_button), w->la);
 	g_signal_connect(w->la_spin_button, "value_changed", G_CALLBACK(handle_la_change), w);
+	gtk_widget_set_tooltip_text(w->la_spin_button, "Lift angle of the escapement in degrees (watch-specific, typically 40–55°)");
 
 	// Calibration label
 	label = gtk_label_new("cal");
@@ -905,6 +911,7 @@ static void init_main_window(struct main_window *w)
 	g_signal_connect(w->cal_spin_button, "value_changed", G_CALLBACK(handle_cal_change), w);
 	g_signal_connect(w->cal_spin_button, "output", G_CALLBACK(output_cal), NULL);
 	g_signal_connect(w->cal_spin_button, "input", G_CALLBACK(input_cal), NULL);
+	gtk_widget_set_tooltip_text(w->cal_spin_button, "Calibration correction in seconds per day (+3.5 means the watch runs 3.5 s/day fast)");
 
 	// Is there a more elegant way?
 	GtkWidget *empty = gtk_label_new("");
@@ -915,6 +922,7 @@ static void init_main_window(struct main_window *w)
 	gtk_box_pack_start(GTK_BOX(hbox), w->snapshot_button, FALSE, FALSE, 0);
 	gtk_widget_set_sensitive(w->snapshot_button, FALSE);
 	g_signal_connect(w->snapshot_button, "clicked", G_CALLBACK(handle_snapshot), w);
+	gtk_widget_set_tooltip_text(w->snapshot_button, "Freeze the current measurement as a new tab for comparison");
 
 	// Snapshot name field
 	GtkWidget *name_label = gtk_label_new("Current snapshot:");
@@ -927,6 +935,10 @@ static void init_main_window(struct main_window *w)
 
 	empty = gtk_label_new("");
 	gtk_box_pack_start(GTK_BOX(hbox), empty, TRUE, FALSE, 0);
+
+	// Keyboard accelerators
+	GtkAccelGroup *accel_group = gtk_accel_group_new();
+	gtk_window_add_accel_group(GTK_WINDOW(w->window), accel_group);
 
 	// Command menu
 	GtkWidget *command_menu = gtk_menu_new();
@@ -946,17 +958,20 @@ static void init_main_window(struct main_window *w)
 	GtkWidget *open_item = gtk_menu_item_new_with_label("Open");
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), open_item);
 	g_signal_connect(open_item, "activate", G_CALLBACK(load), w);
+	gtk_widget_add_accelerator(open_item, "activate", accel_group, GDK_KEY_o, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
 
 	// ... Save
-	w->save_item = gtk_menu_item_new_with_label("Save current display");
+	w->save_item = gtk_menu_item_new_with_label("Save snapshot to file");
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), w->save_item);
 	g_signal_connect(w->save_item, "activate", G_CALLBACK(save_current), w);
+	gtk_widget_add_accelerator(w->save_item, "activate", accel_group, GDK_KEY_s, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
 	gtk_widget_set_sensitive(w->save_item, FALSE);
 
 	// ... Save all
 	w->save_all_item = gtk_menu_item_new_with_label("Save all snapshots");
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), w->save_all_item);
 	g_signal_connect(w->save_all_item, "activate", G_CALLBACK(save_all), w);
+	gtk_widget_add_accelerator(w->save_all_item, "activate", accel_group, GDK_KEY_s, GDK_CONTROL_MASK | GDK_SHIFT_MASK, GTK_ACCEL_VISIBLE);
 	gtk_widget_set_sensitive(w->save_all_item, FALSE);
 
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), gtk_separator_menu_item_new());
@@ -966,11 +981,13 @@ static void init_main_window(struct main_window *w)
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), light_checkbox);
 	g_signal_connect(light_checkbox, "toggled", G_CALLBACK(handle_light), w);
 	gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(light_checkbox), w->is_light);
+	gtk_widget_set_tooltip_text(light_checkbox, "Use a lower sample rate to reduce CPU load; may reduce accuracy on noisy signals");
 
 	// ... Calibrate checkbox
 	w->cal_button = gtk_check_menu_item_new_with_label("Calibrate");
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), w->cal_button);
 	g_signal_connect(w->cal_button, "toggled", G_CALLBACK(handle_calibrate), w);
+	gtk_widget_set_tooltip_text(w->cal_button, "Measure the audio input frequency offset to correct the calibration value");
 
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), gtk_separator_menu_item_new());
 
@@ -984,6 +1001,7 @@ static void init_main_window(struct main_window *w)
 	GtkWidget *quit_item = gtk_menu_item_new_with_label("Quit");
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), quit_item);
 	g_signal_connect(quit_item, "activate", G_CALLBACK(handle_quit), w);
+	gtk_widget_add_accelerator(quit_item, "activate", accel_group, GDK_KEY_q, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
 
 	gtk_widget_show_all(command_menu);
 
@@ -1083,8 +1101,15 @@ static void start_interface(GApplication* app, void *p)
 	set_audio_sample_rate(w->nominal_sr);
 
 	if(start_portaudio(&w->nominal_sr, &real_sr)) {
-		g_application_quit(app);
-		return;
+		int requested_sr = w->nominal_sr;
+		set_audio_sample_rate(PA_SAMPLE_RATE);
+		w->nominal_sr = PA_SAMPLE_RATE;
+		if(start_portaudio(&w->nominal_sr, &real_sr)) {
+			g_application_quit(app);
+			return;
+		}
+		error("Sample rate %d Hz not available on startup; falling back to %d Hz.",
+		      requested_sr, PA_SAMPLE_RATE);
 	}
 	w->audio_device = get_audio_input_device();
 	w->nominal_sr = get_audio_sample_rate();

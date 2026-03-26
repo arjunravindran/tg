@@ -106,6 +106,7 @@ struct calibration_data {
 	int size;
 	int state;
 	double calibration;
+	double delta;		//< Uncertainty of calibration (s/day), set after compute_cal
 	uint64_t start_time;
 	double *times;
 	double *phases;
@@ -172,6 +173,7 @@ struct snapshot {
 	int cal_state;
 	int cal_percent;
 	int cal_result; // 0.1 s/d
+	int cal_sigma;  // uncertainty of cal_result in units of 0.1 s/d (set on failure)
 
 	// data dependent on bph, la, cal
 	double sample_rate;
@@ -203,6 +205,9 @@ struct computer {
 
 	struct snapshot *actv;
 	struct snapshot *curr;
+
+	double amp_history;   //< EMA state for amplitude (unitless ratio), 0 = uninit
+	double rate_history;  //< EMA state for period (samples), 0 = uninit
 };
 
 struct snapshot *snapshot_clone(struct snapshot *s);

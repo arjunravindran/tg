@@ -249,6 +249,29 @@ static gboolean output_draw_event(GtkWidget *widget, cairo_t *c, struct output_p
 				x = print_number(c,x,y,s);
 				x = print_s(c,x,y," %");
 				break;
+			case -1:
+				/* Show the computed (but uncertain) calibration value with
+				 * its uncertainty so the user knows whether to trust it. */
+				if(snst->cal_result) {
+					cairo_set_source(c, red);
+					sprintf(s, " %s%d.%d",
+							snst->cal_result < 0 ? "-" : "+",
+							abs(snst->cal_result) / 10,
+							abs(snst->cal_result) % 10);
+					x = print_s(c,x,y,s);
+					cairo_set_font_size(c, OUTPUT_FONT*2/3);
+					cairo_set_source(c, white);
+					if(snst->cal_sigma > 0) {
+						char sz[20];
+						sprintf(sz, " \xc2\xb1%d.%d s/d",   /* ±N.N s/d */
+								abs(snst->cal_sigma) / 10,
+								abs(snst->cal_sigma) % 10);
+						x = print_s(c,x,y,sz);
+					} else {
+						x = print_s(c,x,y," s/d?");
+					}
+				}
+				break;
 		}
 	} else {
 		char outputs[8][20];
@@ -258,19 +281,24 @@ static gboolean output_draw_event(GtkWidget *widget, cairo_t *c, struct output_p
 			char rates[20];
 			sprintf(rates,"%s%d",rate > 0 ? "+" : rate < 0 ? "-" : "",abs(rate));
 			sprintf(outputs[0],"%4s",rates);
-			sprintf(outputs[2]," %4.1f",be);
+			/* %+5.1f: always show sign; same width as old " %4.1f" */
+			sprintf(outputs[2],"%+5.1f",be);
 			if(snst->amp > 0)
 				sprintf(outputs[4]," %3.0f",snst->amp);
 			else
 				strcpy(outputs[4]," ---");
+			/* Append measurement uncertainty to the rate unit label. */
+			int sr = (int)round(p->sigma / p->period * 86400.0);
+			if(sr > 99) sr = 99;
+			sprintf(outputs[1]," s/d\xc2\xb1%d", sr);  /* s/d±N */
 		} else {
 			strcpy(outputs[0],"----");
 			strcpy(outputs[2]," ----");
 			strcpy(outputs[4]," ---");
+			strcpy(outputs[1]," s/d");
 		}
 		sprintf(outputs[6]," %d",snst->guessed_bph);
 
-		strcpy(outputs[1]," s/d");
 		strcpy(outputs[3]," ms");
 		strcpy(outputs[5]," deg");
 		strcpy(outputs[7]," bph");
@@ -943,6 +971,7 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	GtkWidget *left_button = gtk_button_new_with_label("<");
 	gtk_box_pack_start(GTK_BOX(hbox3), left_button, TRUE, TRUE, 0);
 	g_signal_connect (left_button, "clicked", G_CALLBACK(handle_left), op);
+	gtk_widget_set_tooltip_text(left_button, "Shift trace left");
 
 	// CLEAR button
 	if(comp) {
@@ -950,48 +979,60 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 		gtk_box_pack_start(GTK_BOX(hbox3), op->clear_button, TRUE, TRUE, 0);
 		g_signal_connect (op->clear_button, "clicked", G_CALLBACK(handle_clear_trace), op);
 		gtk_widget_set_sensitive(op->clear_button, !snst->calibrate);
+		gtk_widget_set_tooltip_text(op->clear_button, "Clear the trace and amplitude history");
 	}
 
 	// CENTER button
 	GtkWidget *center_button = gtk_button_new_with_label("Center");
 	gtk_box_pack_start(GTK_BOX(hbox3), center_button, TRUE, TRUE, 0);
 	g_signal_connect (center_button, "clicked", G_CALLBACK(handle_center_trace), op);
+	gtk_widget_set_tooltip_text(center_button, "Center the trace on the most recent beat");
 
 	GtkWidget *zoom_out_button = gtk_button_new_with_label("-");
 	gtk_box_pack_start(GTK_BOX(hbox3), zoom_out_button, TRUE, TRUE, 0);
 	g_signal_connect (zoom_out_button, "clicked", G_CALLBACK(handle_zoom_out), op);
+	gtk_widget_set_tooltip_text(zoom_out_button, "Zoom out");
 
 	GtkWidget *zoom_reset_button = gtk_button_new_with_label("1x");
 	gtk_box_pack_start(GTK_BOX(hbox3), zoom_reset_button, TRUE, TRUE, 0);
 	g_signal_connect (zoom_reset_button, "clicked", G_CALLBACK(handle_zoom_reset), op);
+	gtk_widget_set_tooltip_text(zoom_reset_button, "Reset zoom to default");
 
 	GtkWidget *zoom_in_button = gtk_button_new_with_label("+");
 	gtk_box_pack_start(GTK_BOX(hbox3), zoom_in_button, TRUE, TRUE, 0);
 	g_signal_connect (zoom_in_button, "clicked", G_CALLBACK(handle_zoom_in), op);
+	gtk_widget_set_tooltip_text(zoom_in_button, "Zoom in");
 
 	// > button
 	GtkWidget *right_button = gtk_button_new_with_label(">");
 	gtk_box_pack_start(GTK_BOX(hbox3), right_button, TRUE, TRUE, 0);
 	g_signal_connect (right_button, "clicked", G_CALLBACK(handle_right), op);
+	gtk_widget_set_tooltip_text(right_button, "Shift trace right");
 
 	GtkWidget *vbox3 = gtk_box_new(GTK_ORIENTATION_VERTICAL,10);
 	gtk_box_pack_start(GTK_BOX(hbox2), vbox3, TRUE, TRUE, 0);
 
 	// Tic waveform area
+	GtkWidget *tic_frame = gtk_frame_new("Tic");
 	op->tic_drawing_area = gtk_drawing_area_new();
-	gtk_box_pack_start(GTK_BOX(vbox3), op->tic_drawing_area, TRUE, TRUE, 0);
+	gtk_container_add(GTK_CONTAINER(tic_frame), op->tic_drawing_area);
+	gtk_box_pack_start(GTK_BOX(vbox3), tic_frame, TRUE, TRUE, 0);
 	g_signal_connect (op->tic_drawing_area, "draw", G_CALLBACK(tic_draw_event), op);
 	gtk_widget_set_events(op->tic_drawing_area, GDK_EXPOSURE_MASK);
 
 	// Toc waveform area
+	GtkWidget *toc_frame = gtk_frame_new("Toc");
 	op->toc_drawing_area = gtk_drawing_area_new();
-	gtk_box_pack_start(GTK_BOX(vbox3), op->toc_drawing_area, TRUE, TRUE, 0);
+	gtk_container_add(GTK_CONTAINER(toc_frame), op->toc_drawing_area);
+	gtk_box_pack_start(GTK_BOX(vbox3), toc_frame, TRUE, TRUE, 0);
 	g_signal_connect (op->toc_drawing_area, "draw", G_CALLBACK(toc_draw_event), op);
 	gtk_widget_set_events(op->toc_drawing_area, GDK_EXPOSURE_MASK);
 
 	// Period waveform area
+	GtkWidget *period_frame = gtk_frame_new("Period");
 	op->period_drawing_area = gtk_drawing_area_new();
-	gtk_box_pack_start(GTK_BOX(vbox3), op->period_drawing_area, TRUE, TRUE, 0);
+	gtk_container_add(GTK_CONTAINER(period_frame), op->period_drawing_area);
+	gtk_box_pack_start(GTK_BOX(vbox3), period_frame, TRUE, TRUE, 0);
 	g_signal_connect (op->period_drawing_area, "draw", G_CALLBACK(period_draw_event), op);
 	gtk_widget_set_events(op->period_drawing_area, GDK_EXPOSURE_MASK);
 

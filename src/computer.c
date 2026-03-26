@@ -110,6 +110,12 @@ static void compute_update_cal(struct computer *c)
 	c->actv->cal_percent = 100*c->cdata->wp/c->cdata->size;
 	if(c->cdata->state == 1)
 		c->actv->cal_result = round(10 * c->cdata->calibration);
+	else if(c->cdata->state == -1) {
+		/* Expose the computed value and its uncertainty so the display
+		 * can show the user why the calibration failed. */
+		c->actv->cal_result = round(10 * c->cdata->calibration);
+		c->actv->cal_sigma  = round(10 * c->cdata->delta * 3600 * 24);
+	}
 }
 
 static void compute_update(struct computer *c)
@@ -118,6 +124,7 @@ static void compute_update(struct computer *c)
 	struct processing_buffers *p = c->pdata->buffers;
 	int i;
 	for(i=0; i<NSTEPS && p[i].ready; i++);
+	int last_ready = i - 1;
 	for(i--; i>=0 && p[i].sigma > p[i].period / 10000; i--);
 	if(i>=0) {
 		if(c->actv->pb) pb_destroy_clone(c->actv->pb);
@@ -125,6 +132,13 @@ static void compute_update(struct computer *c)
 		c->actv->is_old = 0;
 		c->actv->signal = i == NSTEPS-1 && p[i].amp < 0 ? signal-1 : signal;
 	} else {
+		/* No step passed the sigma quality filter.  Show the best ready step
+		 * as a preliminary (yellow) result rather than displaying nothing,
+		 * so the user sees readings during the warm-up period. */
+		if(last_ready >= 0) {
+			if(c->actv->pb) pb_destroy_clone(c->actv->pb);
+			c->actv->pb = pb_clone(&p[last_ready]);
+		}
 		c->actv->is_old = 1;
 		c->actv->signal = -signal;
 	}
@@ -180,7 +194,7 @@ void compute_results(struct snapshot *s)
 	if(s->pb) {
 		s->guessed_bph = s->bph ? s->bph : guess_bph(s->pb->period / s->sample_rate);
 		s->rate = (7200/(s->guessed_bph * s->pb->period / s->sample_rate) - 1)*24*3600;
-		s->be = fabs(s->pb->be) * 1000 / s->sample_rate;
+		s->be = s->pb->be * 1000 / s->sample_rate;
 		s->amp = s->la * s->pb->amp; // 0 = not available
 		if(s->amp < 135 || s->amp > 360)
 			s->amp = 0;
@@ -228,6 +242,32 @@ static void *computing_thread(void *void_computer)
 			compute_events(c);
 		}
 
+		/* Apply cross-step amplitude and rate EMA (non-calibration mode only). */
+		if(!calibrate && c->actv->pb) {
+			if(c->actv->is_old) {
+				/* Reset during warm-up so stale history doesn't bleed into
+				 * the first qualified result. */
+				c->amp_history = 0;
+				c->rate_history = 0;
+			} else {
+				/* Amplitude EMA: smooth raw amp across step changes. */
+				double raw_amp = c->actv->pb->amp;
+				if(raw_amp > 0) {
+					c->amp_history = c->amp_history > 0
+						? 0.8 * c->amp_history + 0.2 * raw_amp
+						: raw_amp;
+					c->actv->pb->amp = c->amp_history;
+				} else if(c->amp_history > 0) {
+					c->actv->pb->amp = c->amp_history;
+				}
+				/* Period EMA: smooths rate display against single-cycle spikes. */
+				c->rate_history = c->rate_history > 0
+					? 0.85 * c->rate_history + 0.15 * c->actv->pb->period
+					: c->actv->pb->period;
+				c->actv->pb->period = c->rate_history;
+			}
+		}
+
 		pthread_mutex_lock(&c->mutex);
 			if(c->curr)
 				snapshot_destroy(c->curr);
@@ -237,6 +277,8 @@ static void *computing_thread(void *void_computer)
 					memset(c->actv->events_tictoc,0,c->actv->events_count*sizeof(unsigned char));
 					memset(c->actv->amps,0,c->actv->amps_count*sizeof(*c->actv->amps));
 					memset(c->actv->amps_time,0,c->actv->amps_count*sizeof(*c->actv->amps_time));
+					c->amp_history = 0;
+					c->rate_history = 0;
 				}
 				c->clear_trace = 0;
 			}
@@ -305,7 +347,7 @@ struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int
 	if(!cd) goto error;
 	setup_cal_data(cd);
 
-	s = malloc(sizeof(struct snapshot));
+	s = calloc(1, sizeof(struct snapshot));
 	if(!s) goto error;
 	s->timestamp = 0;
 	s->nominal_sr = nominal_sr;
@@ -355,6 +397,8 @@ struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int
 	c->recompute = 0;
 	c->calibrate = 0;
 	c->clear_trace = 0;
+	c->amp_history = 0;
+	c->rate_history = 0;
 
 	if(pthread_mutex_init(&c->mutex, NULL)) goto thread_init_error;
 	mutex_initialized = 1;

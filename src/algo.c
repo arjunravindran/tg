@@ -95,6 +95,7 @@ void setup_buffers(struct processing_buffers *b)
 	make_lp(b->lpf,(double)FILTER_CUTOFF/b->sample_rate);
 	b->events = malloc(EVENTS_MAX * sizeof(uint64_t));
 	b->events_tictoc = malloc(EVENTS_MAX * sizeof(unsigned char));
+	b->amp_history = 0;
 	b->ready = 0;
 #ifdef DEBUG
 	b->debug_size = b->sample_count;
@@ -351,11 +352,14 @@ static int peak_detector(float *buff, int a, int b)
 	double max = vmax(buff, a, b+1, &i_max);
 	if(max <= 0) return -1;
 
+	int n = b - a + 1;
 	int i;
-	float v[b-a+1];
-	memcpy(v, buff + a, sizeof(v));
-	quickselect(v, b-a+1, (b-a+1)/2);
-	float med = v[(b-a+1)/2];
+	float *v = malloc(n * sizeof(float));
+	if(!v) return -1;
+	memcpy(v, buff + a, n * sizeof(float));
+	quickselect(v, n, n/2);
+	float med = v[n/2];
+	free(v);
 
 	for(i=a+1; i<i_max; i++)
 		if(buff[i] <= med) break;
@@ -397,7 +401,7 @@ static double estimate_period(struct processing_buffers *p)
 		int new_estimate = peak_detector(p->samples_sc,
 					first_estimate / fct - p->sample_rate / 50,
 					first_estimate / fct + p->sample_rate / 50);
-		if(new_estimate > -1 && p->samples_sc[new_estimate] > 0.9 * p->samples_sc[first_estimate]) {
+		if(new_estimate > -1 && p->samples_sc[new_estimate] > 0.75 * p->samples_sc[first_estimate]) {
 			estimate = new_estimate;
 			factor = fct;
 		}
@@ -433,39 +437,57 @@ static int compute_period(struct processing_buffers *b, int bph)
 	}
 	double delta = b->sample_rate * 0.02;
 	double new_estimate = estimate;
-	double sum = 0;
-	double sq_sum = 0;
-	int count = 0;
+	double sum = 0, sq_sum = 0, wsum = 0, wweight = 0;
+	int count = 0, last_peak_pos = -1, last_cycle_used = 0;
 	int cycle = 1;
 	for(;;) {
 		int inf = floor(new_estimate * cycle - delta);
 		int sup = ceil(new_estimate * cycle + delta);
 		if(sup > b->sample_count * 2 / 3)
 			break;
-		new_estimate = peak_detector(b->samples_sc,inf,sup);
+		int raw_peak = peak_detector(b->samples_sc, inf, sup);
+		new_estimate = raw_peak;
 		if(new_estimate == -1) {
-			debug("cycle = %d peak not found\n",cycle);
+			debug("cycle = %d peak not found\n", cycle);
 			return 1;
 		}
 		new_estimate /= cycle;
 		if(new_estimate < estimate - delta || new_estimate > estimate + delta) {
-			debug("cycle = %d new_estimate = %f invalid peak\n",cycle,new_estimate/b->sample_rate);
+			debug("cycle = %d new_estimate = %f invalid peak\n", cycle, new_estimate/b->sample_rate);
 			return 1;
 		} else
-			debug("cycle = %d new_estimate = %f\n",cycle,new_estimate/b->sample_rate);
+			debug("cycle = %d new_estimate = %f\n", cycle, new_estimate/b->sample_rate);
 		if(inf > b->sample_count / 3) {
 			sum += new_estimate;
 			sq_sum += new_estimate * new_estimate;
+			wsum += (double)cycle * cycle * new_estimate;
+			wweight += (double)cycle * cycle;
 			count++;
+			last_peak_pos = raw_peak;
+			last_cycle_used = cycle;
 		}
 		cycle++;
 	}
-	if(count > 0) estimate = sum / count;
-	b->period = estimate;
-	if(count > 1)
-		b->sigma = sqrt((sq_sum - count * estimate * estimate)/ (count-1));
-	else
+	if(count > 0) {
+		double unweighted_mean = sum / count;
+		estimate = wsum / wweight;  /* k²-weighted: higher harmonics carry more precision */
+		b->period = estimate;
+		if(count > 1) {
+			b->sigma = sqrt((sq_sum - count * unweighted_mean * unweighted_mean) / (count-1));
+		} else if(last_peak_pos > 0) {
+			/* Single qualifying harmonic: estimate sigma from autocorrelation peak FWHM */
+			float half = b->samples_sc[last_peak_pos] / 2;
+			int left = last_peak_pos, right = last_peak_pos;
+			while(left > 0 && b->samples_sc[left] >= half) left--;
+			while(right < 2 * b->sample_count - 2 && b->samples_sc[right] >= half) right++;
+			b->sigma = (double)(right - left) / (2.355 * last_cycle_used);
+		} else {
+			b->sigma = b->period;
+		}
+	} else {
+		b->period = estimate;
 		b->sigma = b->period;
+	}
 	return 0;
 }
 
@@ -561,9 +583,14 @@ static void compute_phase(struct processing_buffers *p, double period)
 		int j;
 		p->waveform[i] = 0;
 		for(j=0;;j++) {
-			int n = round(i + j * period);
+			double pos = i + j * period;
+			int n = (int)pos;
 			if(n >= p->sample_count) break;
-			p->waveform[i] += p->samples[n];
+			double frac = pos - n;
+			if(n + 1 < p->sample_count)
+				p->waveform[i] += (float)((1.0 - frac) * p->samples[n] + frac * p->samples[n + 1]);
+			else
+				p->waveform[i] += p->samples[n];
 		}
 		p->waveform[i] /= j;
 	}
@@ -577,20 +604,29 @@ static void compute_phase(struct processing_buffers *p, double period)
 
 static void compute_waveform(struct processing_buffers *p, int wf_size)
 {
-	int i;
+	int i, j;
 	for(i=0; i<2*p->sample_rate; i++)
 		p->waveform[i] = 0;
+
+	int max_bin_size = (int)ceil(1.0 + (double)p->sample_count / wf_size) + 1;
+	float *bin = malloc(max_bin_size * sizeof(float));
+	if(!bin) return;
+
 	for(i=0; i < wf_size; i++) {
-		float bin[(int)ceil(1 + p->sample_count / wf_size)];
-		int j;
-		double k = fmod(i+p->phase,wf_size);
+		double k = fmod(i + p->phase, wf_size);
 		for(j=0;;j++) {
-			int n = round(k+j*wf_size);
+			double pos = k + j * (double)wf_size;
+			int n = (int)pos;
 			if(n >= p->sample_count) break;
-			bin[j] = p->samples[n];
+			double frac = pos - n;
+			if(n + 1 < p->sample_count)
+				bin[j] = (float)((1.0 - frac) * p->samples[n] + frac * p->samples[n + 1]);
+			else
+				bin[j] = p->samples[n];
 		}
-		p->waveform[i] = tmean(bin,j);
+		p->waveform[i] = tmean(bin, j);
 	}
+	free(bin);
 
 	int step = ceil(wf_size / 100);
 	for(i=0; i * step < wf_size; i++)
@@ -624,33 +660,20 @@ static void prepare_waveform_cal(struct processing_buffers *p)
 static void smooth(float *in, float *out, int window, int size)
 {
 	int i;
-	double k = 1 - (1. / window);
-	double r_av = 0;
-	double u = 0;
-	for(i=0; i < window; i++) {
-		u *= k;
-		float x = in[i];
-		if(x > u) u = x;
-		r_av += u;
-	}
-	double w = 0;
-	for(i=0; i + window < size; i++) {
-		out[i] = r_av;
-		u *= k;
-		w *= k;
-		float x = in[i+window];
-		float y = in[i];
-		if(x > u) u = x;
-		if(y > w) w = y;
-		r_av += u - w;
+	double sum = 0;
+	for(i = 0; i < window; i++)
+		sum += in[i];
+	for(i = 0; i + window < size; i++) {
+		out[i] = (float)(sum / window);
+		sum += in[i + window] - in[i];
 	}
 }
 
 static int compute_parameters(struct processing_buffers *p)
 {
 	int tic_to_toc = peak_detector(p->waveform_sc,
-			floor(p->period/2)-p->sample_rate/50,
-			floor(p->period/2)+p->sample_rate/50);
+			floor(p->period/2)-p->sample_rate/40,
+			floor(p->period/2)+p->sample_rate/40);
 	if(tic_to_toc < 0) {
 		debug("beat error = ---\n");
 		return 1;
@@ -660,15 +683,24 @@ static int compute_parameters(struct processing_buffers *p)
 	}
 
 	int wf_size = ceil(p->period);
-	float fold_wf[wf_size - tic_to_toc];
-	int i;
-	for(i = 0; i < wf_size - tic_to_toc; i++)
-		fold_wf[i] = p->waveform[i] + p->waveform[i+tic_to_toc];
 	int window = p->sample_rate / 2000;
-	float smooth_wf[wf_size - tic_to_toc - window];
-	smooth(fold_wf, smooth_wf, window, wf_size - tic_to_toc);
+	int fold_size = wf_size - tic_to_toc;
+	int smooth_size = fold_size - window;
+	float *fold_wf = malloc(fold_size * sizeof(float));
+	float *smooth_wf = smooth_size > 0 ? malloc(smooth_size * sizeof(float)) : NULL;
+	if(!fold_wf || smooth_size <= 0 || !smooth_wf) {
+		free(fold_wf);
+		free(smooth_wf);
+		return 1;
+	}
+	int i;
+	for(i = 0; i < fold_size; i++)
+		fold_wf[i] = p->waveform[i] + p->waveform[i+tic_to_toc];
+	smooth(fold_wf, smooth_wf, window, fold_size);
 	int max_i;
-	float max = vmax(smooth_wf, 0, wf_size - tic_to_toc - window, &max_i);
+	float max = vmax(smooth_wf, 0, smooth_size, &max_i);
+	free(fold_wf);
+	free(smooth_wf);
 	if(max <= 0) return 1;
 	p->tic = max_i;
 	p->toc = p->tic + tic_to_toc;
@@ -731,12 +763,15 @@ static void do_locate_events(struct detected_event *events, struct processing_bu
 static void locate_events(struct processing_buffers *p)
 {
 	int count = 1 + ceil((p->timestamp - p->events_from) / p->period);
-	if(count <= 0 || 2*count >= EVENTS_MAX) {
+	if(count <= 0) {
 		p->events[0] = 0;
 		return;
 	}
+	/* Cap rather than drop: under load keep the most recent events. */
+	if(2*count >= EVENTS_MAX)
+		count = EVENTS_MAX/2 - 1;
 
-	struct detected_event events[2*count];
+	struct detected_event events[EVENTS_MAX]; /* fixed size: 2*count < EVENTS_MAX always */
 	int half = p->tic < p->period/2 ? 0 : round(p->period / 2);
 	int offset = p->tic - half - (p->tic_pulse - p->toc_pulse) / 2;
 	do_locate_events(events, p, p->waveform + half, (int)(p->last_tic + p->sample_count - p->timestamp), offset, count, 1);
@@ -769,7 +804,12 @@ static void compute_amplitude(struct processing_buffers *p, double la)
 	int window = p->sample_rate / 1000;
 	for(i = 0; i < window; i++)
 		p->waveform[i + wf_size] = p->waveform[i];
-	float smooth_wf[wf_size];
+	float *smooth_wf = malloc(wf_size * sizeof(float));
+	if(!smooth_wf) {
+		p->amp = -1;
+		p->tic_pulse = p->toc_pulse = -1;
+		return;
+	}
 	smooth(p->waveform, smooth_wf, window, wf_size + window);
 
 	double max = 0;
@@ -819,7 +859,7 @@ static void compute_amplitude(struct processing_buffers *p, double la)
 			p->amp = (tic_amp_abs + toc_amp_abs) / 2;
 			p->tic_pulse = tic_pulse;
 			p->toc_pulse = toc_pulse;
-			p->be = p->period/2 - fabs(p->toc - p->tic + p->tic_pulse - p->toc_pulse);
+			p->be = p->period/2 - (p->toc - p->tic + p->tic_pulse - p->toc_pulse);
 			debug("amp: be = %.1f\n",fabs(p->be)*1000/p->sample_rate);
 			debug("amp = %f\n", la * p->amp);
 			break;
@@ -827,12 +867,15 @@ static void compute_amplitude(struct processing_buffers *p, double la)
 			debug("amp rejected\n");
 next_threshold:	threshold *= 1.4;
 	}
-	if(p->amp < 0) debug("amp failed\n");
+	if(p->amp <= 0)
+		debug("amp failed\n");
+	free(smooth_wf);
 }
 
 void setup_cal_data(struct calibration_data *cd)
 {
 	cd->size = CAL_DATA_SIZE;
+	cd->delta = 0;
 	cd->times = malloc(cd->size * sizeof(double));
 	cd->phases = malloc(cd->size * sizeof(double));
 	cd->events = malloc(cd->size * sizeof(uint64_t));
@@ -886,37 +929,88 @@ static int add_sample_cal(struct processing_buffers *p, struct calibration_data 
 
 static void compute_cal(struct calibration_data *cd)
 {
-	int i;
-	double x = 0, y = 0;
-	for(i=0;i<cd->size;i++) {
-		x += cos(cd->phases[i] * 2 * M_PI);
-		y += sin(cd->phases[i] * 2 * M_PI);
+	int i, n = cd->size;
+
+	/* Circular mean of phases to find and remove the phase offset */
+	double cx = 0, cy = 0;
+	for(i = 0; i < n; i++) {
+		cx += cos(cd->phases[i] * 2 * M_PI);
+		cy += sin(cd->phases[i] * 2 * M_PI);
 	}
-	double c = (atan2(y,x) - M_PI) / (2 * M_PI);
+	double c = (atan2(cy, cx) - M_PI) / (2 * M_PI);
+
+	/* Phase-offset-removed copy (fixed-size: CAL_DATA_SIZE = 900 doubles = 7.2 kB) */
+	double phases[CAL_DATA_SIZE];
+	for(i = 0; i < n; i++) {
+		phases[i] = fmod(cd->phases[i] - c, 1);
+		cd->phases[i] = phases[i];
+	}
+
+	/* First-pass linear regression */
 	double x_av = 0, y_av = 0;
-	for(i=0;i<cd->size;i++) {
+	for(i = 0; i < n; i++) {
 		x_av += cd->times[i];
-		y_av += cd->phases[i] = fmod(cd->phases[i] - c, 1);
+		y_av += phases[i];
 	}
-	x_av /= cd->size;
-	y_av /= cd->size;
+	x_av /= n; y_av /= n;
 	double xx = 0, xy = 0, yy = 0;
-	for(i=0;i<cd->size;i++) {
-		double x = cd->times[i] - x_av;
-		double y = cd->phases[i] - y_av;
-		xx += x * x;
-		xy += x * y;
-		yy += y * y;
+	for(i = 0; i < n; i++) {
+		double dx = cd->times[i] - x_av;
+		double dy = phases[i] - y_av;
+		xx += dx * dx;
+		xy += dx * dy;
+		yy += dy * dy;
 	}
+
+	/* Outlier rejection: flag points with |residual| > 3 * RMS residual */
+	double slope = xy / xx;
+	double intercept = y_av - slope * x_av;
+	double res_sq = 0;
+	for(i = 0; i < n; i++) {
+		double r = phases[i] - (slope * cd->times[i] + intercept);
+		res_sq += r * r;
+	}
+	double threshold = 3.0 * sqrt(res_sq / n);
+
+	int n2 = 0;
+	double x_av2 = 0, y_av2 = 0;
+	for(i = 0; i < n; i++) {
+		double r = phases[i] - (slope * cd->times[i] + intercept);
+		if(fabs(r) <= threshold) {
+			x_av2 += cd->times[i];
+			y_av2 += phases[i];
+			n2++;
+		}
+	}
+
+	/* Refit with inliers if a meaningful number of outliers were removed */
+	if(n2 >= n / 2 && n2 < n) {
+		x_av2 /= n2; y_av2 /= n2;
+		xx = 0; xy = 0; yy = 0;
+		for(i = 0; i < n; i++) {
+			double r = phases[i] - (slope * cd->times[i] + intercept);
+			if(fabs(r) <= threshold) {
+				double dx = cd->times[i] - x_av2;
+				double dy = phases[i] - y_av2;
+				xx += dx * dx;
+				xy += dx * dy;
+				yy += dy * dy;
+			}
+		}
+		n = n2;
+	}
+
 	cd->calibration = xy * 3600 * 24 / xx;
-	double delta = sqrt((xx * yy - xy * xy) / (cd->size - 2)) / xx;
-	debug("Calibration result: %f s/d +- %f\n",cd->calibration,delta*3600*24);
+	double delta = sqrt((xx * yy - xy * xy) / (n - 2)) / xx;
+	debug("Calibration result: %f s/d +- %f\n", cd->calibration, delta * 3600 * 24);
+	cd->delta = delta;
 	cd->state = delta * 3600 * 24 < 0.1 ? 1 : -1;
 }
 
 void process(struct processing_buffers *p, int bph, double la, int light)
 {
-	prepare_data(p, !light);
+	prepare_data(p, 1); /* always run noise suppressor; light mode affects buffer size, not filtering */
+	(void)light;
 	p->ready = !compute_period(p,bph);
 	/* Limit to 20% greater when period is known, or use typical BPH when guessing. */
 	const int min_bph = bph ? bph : TYP_BPH;

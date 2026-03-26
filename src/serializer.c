@@ -513,7 +513,7 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 	debug("serializer: checking rate\n");
 	if((*s)->rate < -9999 || (*s)->rate > 9999) goto error;
 	debug("serializer: checking beat error\n");
-	if((*s)->be < 0 || (*s)->be > 99.9) goto error;
+	if((*s)->be < -99.9 || (*s)->be > 99.9) goto error;
 	debug("serializer: checking amplitude\n");
 	if((*s)->amp < 0 || (*s)->amp > 360) goto error;
 	if((*s)->trace_zoom <= 0)
@@ -608,7 +608,7 @@ int read_file(FILE *f, struct snapshot ***s, char ***names, uint64_t *cnt)
 	if(scan_string(f, &l, LABEL_SIZE, NULL)) return 1;
 	debug("serializer: read version %s\n",l);
 	if(scan_label(f, l) || strcmp("data",l)) return 1;
-	debug("serializer: found data structure\n",l);
+	debug("serializer: found data structure\n");
 	int n = 0;
 	if(0 != fscanf(f, " T;%n", &n) || !n) return 1;
 	for(;;) {

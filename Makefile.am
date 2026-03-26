@@ -62,11 +62,26 @@ dist_man_MANS = docs/tg-timer.1
 EXTRA_DIST = autogen.sh \
 	     icons \
 	     packaging \
+	     tests \
 	     LICENSE \
 	     README.md
 
 .rc.o:
 	$(WINDRES) $< -O coff -o $@
+
+## Unit tests (make check)
+check_PROGRAMS = test-serializer
+TESTS = test-serializer
+
+test_serializer_SOURCES = tests/test_serializer.c \
+			   src/serializer.c \
+			   src/computer.c \
+			   src/algo.c
+
+test_serializer_CPPFLAGS = $(AM_CPPFLAGS)
+test_serializer_CFLAGS   = $(GTK_CFLAGS) $(GTHREAD_CFLAGS) $(FFTW_CFLAGS)
+test_serializer_LDADD    = $(GTK_LIBS) $(GTHREAD_LIBS) $(FFTW_LIBS) \
+			   -lpthread -lm
 
 test: tg-timer-dbg
 	./tg-timer-dbg test

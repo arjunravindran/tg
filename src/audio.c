@@ -31,6 +31,7 @@ static int selected_sample_rate = PA_SAMPLE_RATE;
 static struct callback_info {
 	int 	channels;	//!< Number of channels
 	bool	light;		//!< Light algorithm in use, copy half data
+	float	aa_buf[4];	//!< Delay line for 5-tap anti-aliasing FIR (light mode only)
 } info;
 
 static int paudio_callback(const void *input_buffer,
@@ -50,19 +51,29 @@ static int paudio_callback(const void *input_buffer,
 
 	if (info->light) {
 		static bool even = true;
-		/* Copy every other sample.  It would be much more efficient to
-		 * just drop the sample rate if the sound hardware supports it.
-		 * This would also avoid the aliasing effects that this simple
-		 * decimation without a low-pass filter causes.  */
+		/* Decimate by 2 with a 5-tap binomial anti-aliasing FIR h=[1,4,6,4,1]/16
+		 * to suppress aliasing from frequencies above Fs/4.  The delay line
+		 * aa_buf[4] persists across callbacks so filtering is continuous. */
+		float *d = ((struct callback_info *)data)->aa_buf;
 		if(info->channels == 1) {
-			for(i = even ? 0 : 1; i < frame_count; i += 2) {
-				pa_buffers[wp++] = input_samples[i];
-				if (wp >= PA_BUFF_SIZE) wp -= PA_BUFF_SIZE;
+			for(i = 0; i < frame_count; i++) {
+				float x = input_samples[i];
+				float y = (x + 4*d[0] + 6*d[1] + 4*d[2] + d[3]) / 16.0f;
+				d[3] = d[2]; d[2] = d[1]; d[1] = d[0]; d[0] = x;
+				if(i % 2 == (even ? 0u : 1u)) {
+					pa_buffers[wp++] = y;
+					if(wp >= PA_BUFF_SIZE) wp -= PA_BUFF_SIZE;
+				}
 			}
 		} else {
-			for(i = even ? 0 : 2; i < frame_count*2; i += 4) {
-				pa_buffers[wp++] = input_samples[i] + input_samples[i+1];
-				if (wp >= PA_BUFF_SIZE) wp -= PA_BUFF_SIZE;
+			for(i = 0; i < frame_count; i++) {
+				float x = input_samples[2*i] + input_samples[2*i+1];
+				float y = (x + 4*d[0] + 6*d[1] + 4*d[2] + d[3]) / 16.0f;
+				d[3] = d[2]; d[2] = d[1]; d[1] = d[0]; d[0] = x;
+				if(i % 2 == (even ? 0u : 1u)) {
+					pa_buffers[wp++] = y;
+					if(wp >= PA_BUFF_SIZE) wp -= PA_BUFF_SIZE;
+				}
 			}
 		}
 		/* Keep track if we have processed an even number of frames, so
@@ -158,9 +169,8 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 		const PaDeviceInfo *failed_info = Pa_GetDeviceInfo(input_device);
 		PaHostApiIndex failed_host = failed_info ? failed_info->hostApi : -1;
 		const PaHostApiInfo *failed_api = (failed_host >= 0) ? Pa_GetHostApiInfo(failed_host) : NULL;
-		const char *failed_api_name = failed_api ? failed_api->name : "unknown";
-
-		debug("Pa_OpenStream failed on host API '%s': %s\n", failed_api_name, Pa_GetErrorText(err));
+		debug("Pa_OpenStream failed on host API '%s': %s\n",
+		      failed_api ? failed_api->name : "unknown", Pa_GetErrorText(err));
 
 		/* Try JACK fallback if ALSA device failed */
 		PaHostApiIndex jack_api = Pa_HostApiTypeIdToHostApiIndex(paJACK);
@@ -400,6 +410,7 @@ void set_audio_light(bool light)
 		pthread_mutex_lock(&audio_mutex);
 		info.light = light;
 		memset(pa_buffers, 0, sizeof(pa_buffers));
+		memset(info.aa_buf, 0, sizeof(info.aa_buf));
 		write_pointer = 0;
 		timestamp = 0;
 		pthread_mutex_unlock(&audio_mutex);
