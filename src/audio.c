@@ -369,6 +369,7 @@ int analyze_pa_data(struct processing_data *pd, int bph, double la, uint64_t eve
 	for(i=0; i<NSTEPS; i++) {
 		p[i].last_tic = pd->last_tic;
 		p[i].events_from = events_from;
+		p[i].algo_classic = pd->algo_classic;
 		process(&p[i], bph, la, pd->is_light);
 		if( !p[i].ready ) break;
 		debug("step %d : %f +- %f\n",i,p[i].period/p[i].sample_rate,p[i].sigma/p[i].sample_rate);
@@ -389,6 +390,8 @@ int analyze_pa_data_cal(struct processing_data *pd, struct calibration_data *cd)
 	int i,j;
 	debug("\nSTART OF CALIBRATION CYCLE\n\n");
 	for(j=0; p[j].sample_count < 2*p[j].sample_rate; j++);
+	for(i=0; i<NSTEPS; i++)
+		p[i].algo_classic = pd->algo_classic;
 	for(i=0; i+j<NSTEPS-1; i++)
 		if(test_cal(&p[i+j]))
 			return i ? i+j : 0;

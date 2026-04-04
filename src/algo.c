@@ -401,7 +401,8 @@ static double estimate_period(struct processing_buffers *p)
 		int new_estimate = peak_detector(p->samples_sc,
 					first_estimate / fct - p->sample_rate / 50,
 					first_estimate / fct + p->sample_rate / 50);
-		if(new_estimate > -1 && p->samples_sc[new_estimate] > 0.75 * p->samples_sc[first_estimate]) {
+		double sub_thresh = p->algo_classic ? 0.9 : 0.75;
+		if(new_estimate > -1 && p->samples_sc[new_estimate] > sub_thresh * p->samples_sc[first_estimate]) {
 			estimate = new_estimate;
 			factor = fct;
 		}
@@ -469,20 +470,29 @@ static int compute_period(struct processing_buffers *b, int bph)
 		cycle++;
 	}
 	if(count > 0) {
-		double unweighted_mean = sum / count;
-		estimate = wsum / wweight;  /* k²-weighted: higher harmonics carry more precision */
-		b->period = estimate;
-		if(count > 1) {
-			b->sigma = sqrt((sq_sum - count * unweighted_mean * unweighted_mean) / (count-1));
-		} else if(last_peak_pos > 0) {
-			/* Single qualifying harmonic: estimate sigma from autocorrelation peak FWHM */
-			float half = b->samples_sc[last_peak_pos] / 2;
-			int left = last_peak_pos, right = last_peak_pos;
-			while(left > 0 && b->samples_sc[left] >= half) left--;
-			while(right < 2 * b->sample_count - 2 && b->samples_sc[right] >= half) right++;
-			b->sigma = (double)(right - left) / (2.355 * last_cycle_used);
+		if(b->algo_classic) {
+			estimate = sum / count;
+			b->period = estimate;
+			if(count > 1)
+				b->sigma = sqrt((sq_sum - count * estimate * estimate) / (count-1));
+			else
+				b->sigma = b->period;
 		} else {
-			b->sigma = b->period;
+			double unweighted_mean = sum / count;
+			estimate = wsum / wweight;  /* k²-weighted: higher harmonics carry more precision */
+			b->period = estimate;
+			if(count > 1) {
+				b->sigma = sqrt((sq_sum - count * unweighted_mean * unweighted_mean) / (count-1));
+			} else if(last_peak_pos > 0) {
+				/* Single qualifying harmonic: estimate sigma from FWHM */
+				float half = b->samples_sc[last_peak_pos] / 2;
+				int left = last_peak_pos, right = last_peak_pos;
+				while(left > 0 && b->samples_sc[left] >= half) left--;
+				while(right < 2 * b->sample_count - 2 && b->samples_sc[right] >= half) right++;
+				b->sigma = (double)(right - left) / (2.355 * last_cycle_used);
+			} else {
+				b->sigma = b->period;
+			}
 		}
 	} else {
 		b->period = estimate;
@@ -584,13 +594,14 @@ static void compute_phase(struct processing_buffers *p, double period)
 		p->waveform[i] = 0;
 		for(j=0;;j++) {
 			double pos = i + j * period;
-			int n = (int)pos;
+			int n = p->algo_classic ? (int)round(pos) : (int)pos;
 			if(n >= p->sample_count) break;
-			double frac = pos - n;
-			if(n + 1 < p->sample_count)
+			if(!p->algo_classic && n + 1 < p->sample_count) {
+				double frac = pos - (int)pos;
 				p->waveform[i] += (float)((1.0 - frac) * p->samples[n] + frac * p->samples[n + 1]);
-			else
+			} else {
 				p->waveform[i] += p->samples[n];
+			}
 		}
 		p->waveform[i] /= j;
 	}
@@ -616,13 +627,14 @@ static void compute_waveform(struct processing_buffers *p, int wf_size)
 		double k = fmod(i + p->phase, wf_size);
 		for(j=0;;j++) {
 			double pos = k + j * (double)wf_size;
-			int n = (int)pos;
+			int n = p->algo_classic ? (int)round(pos) : (int)pos;
 			if(n >= p->sample_count) break;
-			double frac = pos - n;
-			if(n + 1 < p->sample_count)
+			if(!p->algo_classic && n + 1 < p->sample_count) {
+				double frac = pos - (int)pos;
 				bin[j] = (float)((1.0 - frac) * p->samples[n] + frac * p->samples[n + 1]);
-			else
+			} else {
 				bin[j] = p->samples[n];
+			}
 		}
 		p->waveform[i] = tmean(bin, j);
 	}
@@ -657,6 +669,33 @@ static void prepare_waveform_cal(struct processing_buffers *p)
 	compute_waveform(p,p->sample_rate);
 }
 
+/* Classic (pre-0.8) asymmetric EMA-based envelope smoother */
+static void smooth_classic(float *in, float *out, int window, int size)
+{
+	int i;
+	double k = 1 - (1. / window);
+	double r_av = 0;
+	double u = 0;
+	for(i = 0; i < window; i++) {
+		u *= k;
+		float x = in[i];
+		if(x > u) u = x;
+		r_av += u;
+	}
+	double w = 0;
+	for(i = 0; i + window < size; i++) {
+		out[i] = r_av;
+		u *= k;
+		w *= k;
+		float x = in[i+window];
+		float y = in[i];
+		if(x > u) u = x;
+		if(y > w) w = y;
+		r_av += u - w;
+	}
+}
+
+/* Improved symmetric box-filter smoother */
 static void smooth(float *in, float *out, int window, int size)
 {
 	int i;
@@ -810,7 +849,7 @@ static void compute_amplitude(struct processing_buffers *p, double la)
 		p->tic_pulse = p->toc_pulse = -1;
 		return;
 	}
-	smooth(p->waveform, smooth_wf, window, wf_size + window);
+	smooth_classic(p->waveform, smooth_wf, window, wf_size + window);
 
 	double max = 0;
 	for(k = 0; k < 2; k++) {
@@ -859,7 +898,9 @@ static void compute_amplitude(struct processing_buffers *p, double la)
 			p->amp = (tic_amp_abs + toc_amp_abs) / 2;
 			p->tic_pulse = tic_pulse;
 			p->toc_pulse = toc_pulse;
-			p->be = p->period/2 - (p->toc - p->tic + p->tic_pulse - p->toc_pulse);
+			p->be = p->period/2 - (p->algo_classic
+				? fabs(p->toc - p->tic + p->tic_pulse - p->toc_pulse)
+				: (p->toc - p->tic + p->tic_pulse - p->toc_pulse));
 			debug("amp: be = %.1f\n",fabs(p->be)*1000/p->sample_rate);
 			debug("amp = %f\n", la * p->amp);
 			break;
@@ -946,7 +987,7 @@ static void compute_cal(struct calibration_data *cd)
 		cd->phases[i] = phases[i];
 	}
 
-	/* First-pass linear regression */
+	/* Linear regression (first pass) */
 	double x_av = 0, y_av = 0;
 	for(i = 0; i < n; i++) {
 		x_av += cd->times[i];
@@ -962,42 +1003,43 @@ static void compute_cal(struct calibration_data *cd)
 		yy += dy * dy;
 	}
 
-	/* Outlier rejection: flag points with |residual| > 3 * RMS residual */
-	double slope = xy / xx;
-	double intercept = y_av - slope * x_av;
-	double res_sq = 0;
-	for(i = 0; i < n; i++) {
-		double r = phases[i] - (slope * cd->times[i] + intercept);
-		res_sq += r * r;
-	}
-	double threshold = 3.0 * sqrt(res_sq / n);
-
-	int n2 = 0;
-	double x_av2 = 0, y_av2 = 0;
-	for(i = 0; i < n; i++) {
-		double r = phases[i] - (slope * cd->times[i] + intercept);
-		if(fabs(r) <= threshold) {
-			x_av2 += cd->times[i];
-			y_av2 += phases[i];
-			n2++;
+	if(!cd->algo_classic) {
+		/* Improved: two-pass outlier rejection */
+		double slope = xy / xx;
+		double intercept = y_av - slope * x_av;
+		double res_sq = 0;
+		for(i = 0; i < n; i++) {
+			double r = phases[i] - (slope * cd->times[i] + intercept);
+			res_sq += r * r;
 		}
-	}
+		double threshold = 3.0 * sqrt(res_sq / n);
 
-	/* Refit with inliers if a meaningful number of outliers were removed */
-	if(n2 >= n / 2 && n2 < n) {
-		x_av2 /= n2; y_av2 /= n2;
-		xx = 0; xy = 0; yy = 0;
+		int n2 = 0;
+		double x_av2 = 0, y_av2 = 0;
 		for(i = 0; i < n; i++) {
 			double r = phases[i] - (slope * cd->times[i] + intercept);
 			if(fabs(r) <= threshold) {
-				double dx = cd->times[i] - x_av2;
-				double dy = phases[i] - y_av2;
-				xx += dx * dx;
-				xy += dx * dy;
-				yy += dy * dy;
+				x_av2 += cd->times[i];
+				y_av2 += phases[i];
+				n2++;
 			}
 		}
-		n = n2;
+
+		if(n2 >= n / 2 && n2 < n) {
+			x_av2 /= n2; y_av2 /= n2;
+			xx = 0; xy = 0; yy = 0;
+			for(i = 0; i < n; i++) {
+				double r = phases[i] - (slope * cd->times[i] + intercept);
+				if(fabs(r) <= threshold) {
+					double dx = cd->times[i] - x_av2;
+					double dy = phases[i] - y_av2;
+					xx += dx * dx;
+					xy += dx * dy;
+					yy += dy * dy;
+				}
+			}
+			n = n2;
+		}
 	}
 
 	cd->calibration = xy * 3600 * 24 / xx;
@@ -1009,8 +1051,9 @@ static void compute_cal(struct calibration_data *cd)
 
 void process(struct processing_buffers *p, int bph, double la, int light)
 {
-	prepare_data(p, 1); /* always run noise suppressor; light mode affects buffer size, not filtering */
-	(void)light;
+	/* Improved: always run noise suppressor.
+	 * Classic: respect light flag (light mode skips noise suppressor). */
+	prepare_data(p, p->algo_classic ? !light : 1);
 	p->ready = !compute_period(p,bph);
 	/* Limit to 20% greater when period is known, or use typical BPH when guessing. */
 	const int min_bph = bph ? bph : TYP_BPH;
@@ -1049,7 +1092,9 @@ int process_cal(struct processing_buffers *p, struct calibration_data *cd)
 	prepare_waveform_cal(p);
 	if(add_sample_cal(p,cd))
 		return 1;
-	if(cd->wp == cd->size && cd->state == 0)
+	if(cd->wp == cd->size && cd->state == 0) {
+		cd->algo_classic = p->algo_classic;
 		compute_cal(cd);
+	}
 	return 0;
 }

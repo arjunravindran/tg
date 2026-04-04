@@ -95,6 +95,7 @@ struct processing_buffers {
 	uint64_t *events;
 	unsigned char *events_tictoc;
 	float amp_history;
+	int algo_classic;	//< 0 = improved algorithm, 1 = classic (pre-0.8) algorithm
 #ifdef DEBUG
 	int debug_size;
 	float *debug;
@@ -107,6 +108,7 @@ struct calibration_data {
 	int state;
 	double calibration;
 	double delta;		//< Uncertainty of calibration (s/day), set after compute_cal
+	int algo_classic;	//< mirrors processing_buffers::algo_classic
 	uint64_t start_time;
 	double *times;
 	double *phases;
@@ -128,6 +130,7 @@ struct processing_data {
 	struct processing_buffers *buffers;
 	uint64_t last_tic;
 	int is_light;
+	int algo_classic;
 };
 
 int start_portaudio(int *nominal_sample_rate, double *real_sample_rate);
@@ -208,12 +211,13 @@ struct computer {
 
 	double amp_history;   //< EMA state for amplitude (unitless ratio), 0 = uninit
 	double rate_history;  //< EMA state for period (samples), 0 = uninit
+	int algo_classic;     //< mirrors pd->algo_classic; used for restart detection
 };
 
 struct snapshot *snapshot_clone(struct snapshot *s);
 void snapshot_destroy(struct snapshot *s);
 void computer_destroy(struct computer *c);
-struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int light);
+struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int light, int algo_classic);
 void lock_computer(struct computer *c);
 void unlock_computer(struct computer *c);
 void compute_results(struct snapshot *s);
@@ -255,6 +259,7 @@ struct main_window {
 	GtkWidget *snapshot_button;
 	GtkWidget *snapshot_name;
 	GtkWidget *snapshot_name_entry;
+	GtkWidget *algo_combo_box;
 	GtkWidget *cal_button;
 	GtkWidget *notebook;
 	GtkWidget *save_item;
@@ -267,6 +272,7 @@ struct main_window {
 	int computer_timeout;
 
 	int is_light;
+	int algo_classic;	//< 0 = improved, 1 = classic
 	int zombie;
 	int controls_active;
 	int calibrate;
@@ -301,7 +307,8 @@ void error(char *format,...);
 	OP(calibration, cal, int) \
 	OP(light_algorithm, is_light, int) \
 	OP(audio_device, audio_device, int) \
-	OP(audio_rate, nominal_sr, int)
+	OP(audio_rate, nominal_sr, int) \
+	OP(algo_classic, algo_classic, int)
 
 struct conf_data {
 #define DEF(NAME,PLACE,TYPE) TYPE PLACE;

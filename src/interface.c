@@ -242,7 +242,7 @@ static guint computer_terminated(struct main_window *w)
 			w->restart_audio = 0;
 		}
 
-		struct computer *c = start_computer(w->nominal_sr, w->bph, w->la, w->cal, w->is_light);
+		struct computer *c = start_computer(w->nominal_sr, w->bph, w->la, w->cal, w->is_light, w->algo_classic);
 		if(!c) {
 			g_source_remove(w->kick_timeout);
 			g_source_remove(w->save_timeout);
@@ -305,7 +305,8 @@ static void recompute(struct main_window *w)
 	w->computer_timeout = 0;
 	lock_computer(w->computer);
 	if(w->computer->recompute >= 0) {
-		if(w->is_light != w->computer->actv->is_light) {
+		if(w->is_light != w->computer->actv->is_light ||
+		   w->algo_classic != w->computer->algo_classic) {
 			kill_computer(w);
 		} else {
 			w->computer->bph = w->bph;
@@ -346,12 +347,25 @@ static void handle_light(GtkCheckMenuItem *b, struct main_window *w)
 	}
 }
 
+static void handle_algo_change(GtkComboBox *b, struct main_window *w)
+{
+	if(!w->controls_active) return;
+	const gchar *id = gtk_combo_box_get_active_id(b);
+	if(!id) return;
+	int classic = (id[0] == '1');
+	if(classic != w->algo_classic) {
+		w->algo_classic = classic;
+		recompute(w);
+	}
+}
+
 static void controls_active(struct main_window *w, int active)
 {
 	w->controls_active = active;
 	gtk_widget_set_sensitive(w->bph_combo_box, active);
 	gtk_widget_set_sensitive(w->audio_combo_box, active);
 	gtk_widget_set_sensitive(w->sample_rate_combo_box, active);
+	gtk_widget_set_sensitive(w->algo_combo_box, active);
 	gtk_widget_set_sensitive(w->la_spin_button, active);
 	gtk_widget_set_sensitive(w->cal_spin_button, active);
 	gtk_widget_set_sensitive(w->cal_button, active);
@@ -889,6 +903,19 @@ static void init_main_window(struct main_window *w)
 	g_signal_connect(w->sample_rate_combo_box, "changed", G_CALLBACK(handle_sample_rate_change), w);
 	gtk_widget_set_tooltip_text(w->sample_rate_combo_box, "Audio sample rate — higher values improve accuracy, lower values reduce CPU load");
 
+	// Algorithm selector label
+	label = gtk_label_new("algo");
+	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+
+	// Algorithm selector combo box
+	w->algo_combo_box = gtk_combo_box_text_new();
+	gtk_box_pack_start(GTK_BOX(hbox), w->algo_combo_box, FALSE, FALSE, 0);
+	gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(w->algo_combo_box), "0", "Improved");
+	gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(w->algo_combo_box), "1", "Classic");
+	gtk_combo_box_set_active_id(GTK_COMBO_BOX(w->algo_combo_box), w->algo_classic ? "1" : "0");
+	g_signal_connect(w->algo_combo_box, "changed", G_CALLBACK(handle_algo_change), w);
+	gtk_widget_set_tooltip_text(w->algo_combo_box, "Improved: weighted period, interpolated waveform, robust cal. Classic: original pre-0.8 algorithm");
+
 	// Lift angle label and spin button
 	label = gtk_label_new("lift angle");
 	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
@@ -1092,6 +1119,7 @@ static void start_interface(GApplication* app, void *p)
 	w->la = DEFAULT_LA;
 	w->calibrate = 0;
 	w->is_light = 0;
+	w->algo_classic = 0;
 	w->nominal_sr = PA_SAMPLE_RATE;
 	w->audio_device = AUDIO_DEVICE_DEFAULT;
 	w->restart_audio = 0;
@@ -1121,7 +1149,7 @@ static void start_interface(GApplication* app, void *p)
 
 	w->computer_timeout = 0;
 
-	w->computer = start_computer(w->nominal_sr, w->bph, w->la, w->cal, w->is_light);
+	w->computer = start_computer(w->nominal_sr, w->bph, w->la, w->cal, w->is_light, w->algo_classic);
 	if(!w->computer) {
 		error("Error starting computation thread");
 		g_application_quit(app);

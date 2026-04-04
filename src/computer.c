@@ -311,7 +311,7 @@ void computer_destroy(struct computer *c)
 	free(c);
 }
 
-struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int light)
+struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int light, int algo_classic)
 {
 	struct processing_buffers *p = NULL;
 	struct processing_data *pd = NULL;
@@ -342,6 +342,7 @@ struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int
 	pd->buffers = p;
 	pd->last_tic = 0;
 	pd->is_light = light;
+	pd->algo_classic = algo_classic;
 
 	cd = malloc(sizeof(struct calibration_data));
 	if(!cd) goto error;
@@ -399,6 +400,7 @@ struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int
 	c->clear_trace = 0;
 	c->amp_history = 0;
 	c->rate_history = 0;
+	c->algo_classic = algo_classic;
 
 	if(pthread_mutex_init(&c->mutex, NULL)) goto thread_init_error;
 	mutex_initialized = 1;
