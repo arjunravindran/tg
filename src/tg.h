@@ -211,6 +211,7 @@ struct computer {
 
 	double amp_history;   //< EMA state for amplitude (unitless ratio), 0 = uninit
 	double rate_history;  //< EMA state for period (samples), 0 = uninit
+	double be_history;    //< EMA state for beat error (samples), 0 = uninit
 	int algo_classic;     //< mirrors pd->algo_classic; used for restart detection
 };
 
@@ -232,6 +233,9 @@ struct output_panel {
 	GtkWidget *period_drawing_area;
 	GtkWidget *paperstrip_drawing_area;
 	GtkWidget *clear_button;
+	GtkWidget *balance_wheel_area;   //< balance-wheel drawing area
+	GtkWidget *classic_panel_box;    //< container holding tic/toc/period frames
+	int wheel_view;                  //< 0 = classic strips, 1 = balance wheel
 #ifdef DEBUG
 	GtkWidget *debug_drawing_area;
 #endif

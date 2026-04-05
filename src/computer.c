@@ -249,6 +249,7 @@ static void *computing_thread(void *void_computer)
 				 * the first qualified result. */
 				c->amp_history = 0;
 				c->rate_history = 0;
+				c->be_history = 0;
 			} else {
 				/* Amplitude EMA: smooth raw amp across step changes. */
 				double raw_amp = c->actv->pb->amp;
@@ -265,6 +266,13 @@ static void *computing_thread(void *void_computer)
 					? 0.85 * c->rate_history + 0.15 * c->actv->pb->period
 					: c->actv->pb->period;
 				c->actv->pb->period = c->rate_history;
+			/* Beat error EMA: damps threshold jitter (alpha=0.4, ~2-frame avg).
+				 * Values are unbiased since smooth_classic() is used for pulse
+				 * detection in both algorithm modes, so averaging does not drift. */
+				c->be_history = c->be_history != 0
+					? 0.6 * c->be_history + 0.4 * c->actv->pb->be
+					: c->actv->pb->be;
+				c->actv->pb->be = c->be_history;
 			}
 		}
 
@@ -279,6 +287,7 @@ static void *computing_thread(void *void_computer)
 					memset(c->actv->amps_time,0,c->actv->amps_count*sizeof(*c->actv->amps_time));
 					c->amp_history = 0;
 					c->rate_history = 0;
+				c->be_history = 0;
 				}
 				c->clear_trace = 0;
 			}
@@ -400,6 +409,7 @@ struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int
 	c->clear_trace = 0;
 	c->amp_history = 0;
 	c->rate_history = 0;
+	c->be_history = 0;
 	c->algo_classic = algo_classic;
 
 	if(pthread_mutex_init(&c->mutex, NULL)) goto thread_init_error;

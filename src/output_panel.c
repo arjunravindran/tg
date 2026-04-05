@@ -934,6 +934,331 @@ void op_destroy(struct output_panel *op)
 	free(op);
 }
 
+static gboolean balance_wheel_draw_event(GtkWidget *widget, cairo_t *cr, struct output_panel *op)
+{
+	UNUSED(widget);
+	cairo_init(cr);
+
+	struct snapshot *snst = op->snst;
+	if(!snst) return FALSE;
+
+	GtkAllocation alloc;
+	gtk_widget_get_allocation(op->balance_wheel_area, &alloc);
+	int width  = alloc.width;
+	int height = alloc.height;
+	double cx = width  / 2.0;
+	double cy = height / 2.0;
+	int size   = width < height ? width : height;
+	double scale = size / 2.70;
+
+	/* calibrating → simple label */
+	if(snst->calibrate) {
+		cairo_select_font_face(cr, "Monospace",
+		                       CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+		cairo_set_font_size(cr, 18);
+		cairo_set_source_rgb(cr, 0.8, 0.8, 0.8);
+		cairo_text_extents_t ex;
+		const char *msg = "calibrating...";
+		cairo_text_extents(cr, msg, &ex);
+		cairo_move_to(cr, cx - ex.x_advance / 2.0, cy - ex.y_bearing / 2.0);
+		cairo_show_text(cr, msg);
+		return FALSE;
+	}
+
+	/* --- geometry macros (local) --- */
+#define PX(r, d) (cx + (r) * scale * cos((d) * M_PI / 180.0))
+#define PY(r, d) (cy - (r) * scale * sin((d) * M_PI / 180.0))
+
+	/* --- decide if we have a live signal --- */
+	int bph = snst->guessed_bph > 0 ? snst->guessed_bph
+	                                 : (snst->bph ? snst->bph : DEFAULT_BPH);
+	int has_signal = (snst->amp > 0.0);
+
+	double amplitude     = has_signal ? snst->amp  : 0.0;
+	double be_ms         = has_signal ? snst->be   : 0.0;
+	double rate_spd      = has_signal ? snst->rate : 0.0;
+
+	double half_amp        = amplitude / 2.0;
+	double half_period_ms  = 1800000.0 / bph;
+	double be_angle        = (half_period_ms > 0.0)
+	                         ? (be_ms / half_period_ms) * half_amp : 0.0;
+
+	double toc_deg    = 90.0 - half_amp + be_angle / 2.0;
+	double tic_deg    = 90.0 + half_amp + be_angle / 2.0;
+	double center_deg = (tic_deg + toc_deg) / 2.0;
+	double ideal_center = 90.0;
+	double arc_span   = amplitude;
+
+	/* ================================================================
+	 * 1. Degree scale ring
+	 * ================================================================ */
+	int i;
+	for(i = 0; i < 360; i += 5) {
+		double inner = (i % 30 == 0) ? 1.05 : 1.08;
+		cairo_move_to(cr, PX(inner, i), PY(inner, i));
+		cairo_line_to(cr, PX(1.15,  i), PY(1.15,  i));
+		cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);
+		cairo_set_line_width(cr, (i % 30 == 0) ? 1.5 : 0.8);
+		cairo_stroke(cr);
+	}
+	/* degree labels every 30° */
+	cairo_select_font_face(cr, "Monospace",
+	                       CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+	cairo_set_font_size(cr, 0.09 * scale);
+	for(i = 0; i < 360; i += 30) {
+		char lbl[8];
+		snprintf(lbl, sizeof(lbl), "%d", i);
+		cairo_text_extents_t ex;
+		cairo_text_extents(cr, lbl, &ex);
+		double lx = PX(1.22, i) - ex.x_advance / 2.0;
+		double ly = PY(1.22, i) - ex.y_bearing  / 2.0;
+		cairo_set_source_rgb(cr, 0.55, 0.55, 0.55);
+		cairo_move_to(cr, lx, ly);
+		cairo_show_text(cr, lbl);
+	}
+
+	/* ================================================================
+	 * 2. Dotted reference line straight up (90°)
+	 * ================================================================ */
+	cairo_set_line_width(cr, 1.0);
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	{
+		int j;
+		int N = 20;
+		for(j = 0; j < N; j += 2) {
+			double r0 = 0.08 + j       * (1.0 / N);
+			double r1 = 0.08 + (j + 1) * (1.0 / N);
+			cairo_move_to(cr, PX(r0, ideal_center), PY(r0, ideal_center));
+			cairo_line_to(cr, PX(r1, ideal_center), PY(r1, ideal_center));
+			cairo_stroke(cr);
+		}
+	}
+
+	if(!has_signal) {
+		/* --- skeleton: dimmed 270° arc --- */
+		int N = 270;
+		cairo_set_line_width(cr, 2.0);
+		cairo_set_source_rgb(cr, 0.3, 0.3, 0.3);
+		for(i = 0; i < N; i++) {
+			double ang = -45.0 + i * 270.0 / N;
+			double ang1 = -45.0 + (i + 1) * 270.0 / N;
+			cairo_move_to(cr, PX(1.0, ang),  PY(1.0, ang));
+			cairo_line_to(cr, PX(1.0, ang1), PY(1.0, ang1));
+		}
+		cairo_stroke(cr);
+		/* rim */
+		cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
+		cairo_set_line_width(cr, 3.0);
+		cairo_arc(cr, cx, cy, 1.0 * scale, 0, 2 * M_PI);
+		cairo_stroke(cr);
+		/* hub */
+		cairo_set_source_rgb(cr, 0.4, 0.4, 0.4);
+		cairo_arc(cr, cx, cy, 0.07 * scale, 0, 2 * M_PI);
+		cairo_fill(cr);
+
+		/* "----" readouts */
+		cairo_select_font_face(cr, "Monospace",
+		                       CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+		cairo_set_font_size(cr, 0.10 * scale);
+		cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);
+		const char *lines[] = {"---- s/d", "---- °", "---- ms", NULL};
+		double ly = cy - 0.20 * scale;
+		for(i = 0; lines[i]; i++, ly += 0.14 * scale) {
+			cairo_text_extents_t ex;
+			cairo_text_extents(cr, lines[i], &ex);
+			cairo_move_to(cr, cx - ex.x_advance / 2.0, ly);
+			cairo_show_text(cr, lines[i]);
+		}
+		return FALSE;
+	}
+
+	/* ================================================================
+	 * 3. Gold amplitude arc: from toc_deg to tic_deg counterclockwise
+	 *    (i.e. sweep of arc_span degrees through the top)
+	 * ================================================================ */
+	{
+		int N = (int)(arc_span * 2);
+		if(N < 4) N = 4;
+		cairo_set_line_width(cr, 4.0);
+		cairo_set_source_rgb(cr, 0.980, 0.761, 0.020); /* goldenrod */
+		for(i = 0; i < N; i++) {
+			double ang  = toc_deg + i       * arc_span / N;
+			double ang1 = toc_deg + (i + 1) * arc_span / N;
+			cairo_move_to(cr, PX(1.0, ang),  PY(1.0, ang));
+			cairo_line_to(cr, PX(1.0, ang1), PY(1.0, ang1));
+		}
+		cairo_stroke(cr);
+	}
+
+	/* ================================================================
+	 * 4. Blue dots + dashed radial lines at TIC and TOC endpoints
+	 * ================================================================ */
+	double endpoints[2] = { toc_deg, tic_deg };
+	for(i = 0; i < 2; i++) {
+		double ang = endpoints[i];
+		/* dashed radial */
+		cairo_set_source_rgb(cr, 0.2, 0.2, 1.0);
+		cairo_set_line_width(cr, 1.0);
+		int j;
+		int N = 10;
+		for(j = 0; j < N; j += 2) {
+			double r0 = j       * 1.0 / N;
+			double r1 = (j + 1) * 1.0 / N;
+			cairo_move_to(cr, PX(r0, ang), PY(r0, ang));
+			cairo_line_to(cr, PX(r1, ang), PY(r1, ang));
+			cairo_stroke(cr);
+		}
+		/* blue dot on rim */
+		cairo_set_source_rgb(cr, 0.2, 0.2, 1.0);
+		cairo_arc(cr, PX(1.0, ang), PY(1.0, ang), 4.0, 0, 2 * M_PI);
+		cairo_fill(cr);
+	}
+
+	/* ================================================================
+	 * 5. Red beat-error arc between ideal_center and center_deg
+	 * ================================================================ */
+	if(fabs(be_angle) > 0.01) {
+		int N = (int)(fabs(be_angle) * 2);
+		if(N < 4) N = 4;
+		double from_d = ideal_center;
+		double span_d = center_deg - ideal_center;
+		cairo_set_source_rgb(cr, 1.0, 0.15, 0.15);
+		cairo_set_line_width(cr, 3.0);
+		for(i = 0; i < N; i++) {
+			double ang  = from_d + i       * span_d / N;
+			double ang1 = from_d + (i + 1) * span_d / N;
+			cairo_move_to(cr, PX(0.92, ang),  PY(0.92, ang));
+			cairo_line_to(cr, PX(0.92, ang1), PY(0.92, ang1));
+		}
+		cairo_stroke(cr);
+	}
+
+	/* ================================================================
+	 * 6. Balance wheel body
+	 * ================================================================ */
+	/* rim circle */
+	cairo_set_source_rgb(cr, 0.7, 0.7, 0.7);
+	cairo_set_line_width(cr, 3.0);
+	cairo_arc(cr, cx, cy, 1.0 * scale, 0, 2 * M_PI);
+	cairo_stroke(cr);
+
+	/* 4 spokes at center_deg, center_deg+90, center_deg+180, center_deg+270 */
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	cairo_set_line_width(cr, 2.0);
+	for(i = 0; i < 4; i++) {
+		double sang = center_deg + i * 90.0;
+		cairo_move_to(cr, PX(0.0, sang), PY(0.0, sang));
+		cairo_line_to(cr, PX(1.0, sang), PY(1.0, sang));
+		cairo_stroke(cr);
+	}
+
+	/* gold impulse-pin dot on rim at center_deg */
+	cairo_set_source_rgb(cr, 0.980, 0.761, 0.020);
+	cairo_arc(cr, PX(1.0, center_deg), PY(1.0, center_deg), 5.0, 0, 2 * M_PI);
+	cairo_fill(cr);
+
+	/* hub */
+	cairo_set_source_rgb(cr, 0.85, 0.85, 0.85);
+	cairo_arc(cr, cx, cy, 0.07 * scale, 0, 2 * M_PI);
+	cairo_fill(cr);
+
+	/* ================================================================
+	 * 7. Numeric readouts
+	 * ================================================================ */
+	cairo_select_font_face(cr, "Monospace",
+	                       CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+	cairo_set_font_size(cr, 0.10 * scale);
+
+	/* rate: colour-coded ±15/60 s/d */
+	{
+		char s[32];
+		snprintf(s, sizeof(s), "%+.1f s/d", rate_spd);
+		double ar = fabs(rate_spd);
+		if(ar <= 15.0)
+			cairo_set_source_rgb(cr, 0.0, 0.8, 0.0);
+		else if(ar <= 60.0)
+			cairo_set_source_rgb(cr, 1.0, 1.0, 0.0);
+		else
+			cairo_set_source_rgb(cr, 1.0, 0.2, 0.2);
+		if(snst->is_old)
+			cairo_set_source_rgb(cr, 1.0, 1.0, 0.0);
+		cairo_text_extents_t ex;
+		cairo_text_extents(cr, s, &ex);
+		cairo_move_to(cr, cx - ex.x_advance / 2.0, cy - 0.28 * scale);
+		cairo_show_text(cr, s);
+	}
+
+	/* amplitude: gold */
+	{
+		char s[32];
+		snprintf(s, sizeof(s), "%.0f deg", amplitude);
+		cairo_set_source_rgb(cr, 0.980, 0.761, 0.020);
+		cairo_text_extents_t ex;
+		cairo_text_extents(cr, s, &ex);
+		cairo_move_to(cr, cx - ex.x_advance / 2.0, cy - 0.14 * scale);
+		cairo_show_text(cr, s);
+	}
+
+	/* beat error: colour-coded ±1/2.5 ms */
+	{
+		char s[32];
+		snprintf(s, sizeof(s), "%+.2f ms", be_ms);
+		double ab = fabs(be_ms);
+		if(ab <= 1.0)
+			cairo_set_source_rgb(cr, 0.0, 0.8, 0.0);
+		else if(ab <= 2.5)
+			cairo_set_source_rgb(cr, 1.0, 1.0, 0.0);
+		else
+			cairo_set_source_rgb(cr, 1.0, 0.2, 0.2);
+		if(snst->is_old)
+			cairo_set_source_rgb(cr, 1.0, 1.0, 0.0);
+		cairo_text_extents_t ex;
+		cairo_text_extents(cr, s, &ex);
+		cairo_move_to(cr, cx - ex.x_advance / 2.0, cy);
+		cairo_show_text(cr, s);
+	}
+
+	/* BPH inside wheel */
+	{
+		char s[32];
+		snprintf(s, sizeof(s), "%d bph", bph);
+		cairo_set_source_rgb(cr, 0.7, 0.7, 0.7);
+		cairo_set_font_size(cr, 0.08 * scale);
+		cairo_text_extents_t ex;
+		cairo_text_extents(cr, s, &ex);
+		cairo_move_to(cr, cx - ex.x_advance / 2.0, cy + 0.15 * scale);
+		cairo_show_text(cr, s);
+	}
+
+#undef PX
+#undef PY
+	return FALSE;
+}
+
+static void handle_view_toggle(GtkToggleButton *btn, struct output_panel *op)
+{
+	op->wheel_view = gtk_toggle_button_get_active(btn);
+	if(op->wheel_view) {
+		gtk_widget_hide(op->classic_panel_box);
+		gtk_widget_show(op->balance_wheel_area);
+		gtk_button_set_label(GTK_BUTTON(btn), "Classic");
+	} else {
+		gtk_widget_show(op->classic_panel_box);
+		gtk_widget_hide(op->balance_wheel_area);
+		gtk_button_set_label(GTK_BUTTON(btn), "Wheel");
+	}
+}
+
+void redraw_op(struct output_panel *op)
+{
+	gtk_widget_queue_draw(op->output_drawing_area);
+	gtk_widget_queue_draw(op->tic_drawing_area);
+	gtk_widget_queue_draw(op->toc_drawing_area);
+	gtk_widget_queue_draw(op->period_drawing_area);
+	gtk_widget_queue_draw(op->balance_wheel_area);
+	gtk_widget_queue_draw(op->paperstrip_drawing_area);
+}
+
 struct output_panel *init_output_panel(struct computer *comp, struct snapshot *snst, int border)
 {
 	struct output_panel *op = malloc(sizeof(struct output_panel));
@@ -1009,14 +1334,24 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	g_signal_connect (right_button, "clicked", G_CALLBACK(handle_right), op);
 	gtk_widget_set_tooltip_text(right_button, "Shift trace right");
 
-	GtkWidget *vbox3 = gtk_box_new(GTK_ORIENTATION_VERTICAL,10);
+	// Wheel toggle button
+	GtkWidget *wheel_toggle = gtk_toggle_button_new_with_label("Wheel");
+	gtk_box_pack_start(GTK_BOX(hbox3), wheel_toggle, TRUE, TRUE, 0);
+	gtk_widget_set_tooltip_text(wheel_toggle, "Switch to balance wheel view");
+	g_signal_connect(wheel_toggle, "toggled", G_CALLBACK(handle_view_toggle), op);
+
+	GtkWidget *vbox3 = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
 	gtk_box_pack_start(GTK_BOX(hbox2), vbox3, TRUE, TRUE, 0);
+
+	// Classic panel box (default view)
+	op->classic_panel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+	gtk_box_pack_start(GTK_BOX(vbox3), op->classic_panel_box, TRUE, TRUE, 0);
 
 	// Tic waveform area
 	GtkWidget *tic_frame = gtk_frame_new("Tic");
 	op->tic_drawing_area = gtk_drawing_area_new();
 	gtk_container_add(GTK_CONTAINER(tic_frame), op->tic_drawing_area);
-	gtk_box_pack_start(GTK_BOX(vbox3), tic_frame, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(op->classic_panel_box), tic_frame, TRUE, TRUE, 0);
 	g_signal_connect (op->tic_drawing_area, "draw", G_CALLBACK(tic_draw_event), op);
 	gtk_widget_set_events(op->tic_drawing_area, GDK_EXPOSURE_MASK);
 
@@ -1024,7 +1359,7 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	GtkWidget *toc_frame = gtk_frame_new("Toc");
 	op->toc_drawing_area = gtk_drawing_area_new();
 	gtk_container_add(GTK_CONTAINER(toc_frame), op->toc_drawing_area);
-	gtk_box_pack_start(GTK_BOX(vbox3), toc_frame, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(op->classic_panel_box), toc_frame, TRUE, TRUE, 0);
 	g_signal_connect (op->toc_drawing_area, "draw", G_CALLBACK(toc_draw_event), op);
 	gtk_widget_set_events(op->toc_drawing_area, GDK_EXPOSURE_MASK);
 
@@ -1032,16 +1367,24 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	GtkWidget *period_frame = gtk_frame_new("Period");
 	op->period_drawing_area = gtk_drawing_area_new();
 	gtk_container_add(GTK_CONTAINER(period_frame), op->period_drawing_area);
-	gtk_box_pack_start(GTK_BOX(vbox3), period_frame, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(op->classic_panel_box), period_frame, TRUE, TRUE, 0);
 	g_signal_connect (op->period_drawing_area, "draw", G_CALLBACK(period_draw_event), op);
 	gtk_widget_set_events(op->period_drawing_area, GDK_EXPOSURE_MASK);
 
 #ifdef DEBUG
 	op->debug_drawing_area = gtk_drawing_area_new();
-	gtk_box_pack_start(GTK_BOX(vbox3), op->debug_drawing_area, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(op->classic_panel_box), op->debug_drawing_area, TRUE, TRUE, 0);
 	g_signal_connect (op->debug_drawing_area, "draw", G_CALLBACK(debug_draw_event), op);
 	gtk_widget_set_events(op->debug_drawing_area, GDK_EXPOSURE_MASK);
 #endif
+
+	// Balance wheel area (hidden by default)
+	op->balance_wheel_area = gtk_drawing_area_new();
+	gtk_box_pack_start(GTK_BOX(vbox3), op->balance_wheel_area, TRUE, TRUE, 0);
+	g_signal_connect(op->balance_wheel_area, "draw", G_CALLBACK(balance_wheel_draw_event), op);
+	gtk_widget_set_events(op->balance_wheel_area, GDK_EXPOSURE_MASK);
+	gtk_widget_hide(op->balance_wheel_area);
+	op->wheel_view = 0;
 
 	return op;
 }
