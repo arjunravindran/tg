@@ -23,7 +23,7 @@
 float pa_buffers[PA_BUFF_SIZE];
 int write_pointer = 0;
 uint64_t timestamp = 0;
-pthread_mutex_t audio_mutex;
+pthread_mutex_t audio_mutex = PTHREAD_MUTEX_INITIALIZER;
 static PaDeviceIndex selected_input_device = paNoDevice;
 static int selected_sample_rate = PA_SAMPLE_RATE;
 
@@ -105,11 +105,6 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 {
 	PaStream *stream;
 
-	if(pthread_mutex_init(&audio_mutex,NULL)) {
-		error("Failed to setup audio mutex");
-		return 1;
-	}
-
 	PaError err = Pa_Initialize();
 	if(err!=paNoError)
 		goto error;
@@ -125,7 +120,7 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 	PaDeviceIndex default_input = Pa_GetDefaultInputDevice();
 	if(default_input == paNoDevice) {
 		error("No default audio input device found");
-		return 1;
+		goto fail;
 	}
 
 	PaDeviceIndex input_device = default_input;
@@ -140,13 +135,13 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 	const PaDeviceInfo *input_info = Pa_GetDeviceInfo(input_device);
 	if(!input_info) {
 		error("Unable to query selected audio input device");
-		return 1;
+		goto fail;
 	}
 
 	long channels = input_info->maxInputChannels;
 	if(channels == 0) {
 		error("Selected audio device has no input channels");
-		return 1;
+		goto fail;
 	}
 	if(channels > 2) channels = 2;
 	info.channels = channels;
@@ -202,6 +197,23 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 			}
 		}
 
+		/* The requested rate may simply be unsupported by this device:
+		 * retry at the device's native rate before giving up. */
+		if(err != paNoError && input_info->defaultSampleRate > 0 &&
+		   (int)input_info->defaultSampleRate != selected_sample_rate) {
+			int native_sr = (int)input_info->defaultSampleRate;
+			PaError nerr = Pa_OpenStream(&stream,&input_parameters,NULL,native_sr,paFramesPerBufferUnspecified,paNoFlag,paudio_callback,&info);
+			if(nerr == paNoError) {
+				error("Sample rate %d Hz is not supported by this device; "
+				      "using its native rate of %d Hz instead.",
+				      selected_sample_rate, native_sr);
+				selected_sample_rate = native_sr;
+				err = paNoError;
+			} else
+				debug("Retry at device native rate %d also failed: %s\n",
+				      native_sr, Pa_GetErrorText(nerr));
+		}
+
 		if(err != paNoError) {
 			/* Emit platform-specific hint before the generic error */
 			if(failed_api && failed_api->type == paALSA)
@@ -233,6 +245,9 @@ end:
 
 error:
 	error("Error opening audio input: %s", Pa_GetErrorText(err));
+fail:
+	/* Balance Pa_Initialize so repeated open attempts don't leak refcounts. */
+	Pa_Terminate();
 	return 1;
 }
 
@@ -338,6 +353,10 @@ uint64_t get_timestamp(int light)
 
 static void fill_buffers(struct processing_buffers *ps, int light)
 {
+	/* pa_buffers itself is deliberately read without the lock: the ring
+	 * (PA_BUFF_SIZE) is far larger than what the callback writes during
+	 * one copy, so the region behind our snapshot of write_pointer is
+	 * never the region being written.  Only wp/timestamp need the lock. */
 	pthread_mutex_lock(&audio_mutex);
 	uint64_t ts = timestamp;
 	int wp = write_pointer;

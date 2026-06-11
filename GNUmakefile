@@ -80,8 +80,12 @@ all: tg-timer.exe
 tg-timer.exe: $(OBJS) $(RC_OBJ)
 	$(CC) -mwindows -o $@ $^ $(LIBS)
 
+# windres is broken on this host (popen of gcc fails); fall back to an
+# empty object so the link still succeeds, just without the embedded icon.
 $(RC_OBJ): icons/tg-timer.rc
-	$(WINDRES) $< -O coff -o $@
+	$(WINDRES) $< -O coff -o $@ || \
+	{ echo "windres failed -- building without embedded icon"; \
+	  $(CC) -x c -c /dev/null -o $@; }
 
 %.o: %.c src/tg.h
 	$(CC) $(CFLAGS) -c -o $@ $<

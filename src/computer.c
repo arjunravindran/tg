@@ -33,13 +33,24 @@ static int count_events_buffer(const uint64_t *events, int wp, int nevents)
 struct snapshot *snapshot_clone(struct snapshot *s)
 {
 	struct snapshot *t = malloc(sizeof(struct snapshot));
+	if(!t) return NULL;
 	memcpy(t,s,sizeof(struct snapshot));
-	if(s->pb) t->pb = pb_clone(s->pb);
+	if(s->pb) {
+		t->pb = pb_clone(s->pb);
+		if(!t->pb) { free(t); return NULL; }
+	}
 	t->events_count = count_events_buffer(s->events, s->events_wp, s->events_count);
 	if(t->events_count) {
 		t->events_wp = t->events_count - 1;
 		t->events = malloc(t->events_count * sizeof(uint64_t));
 		t->events_tictoc = malloc(t->events_count * sizeof(unsigned char));
+		if(!t->events || !t->events_tictoc) {
+			free(t->events);
+			free(t->events_tictoc);
+			if(t->pb) pb_destroy_clone(t->pb);
+			free(t);
+			return NULL;
+		}
 		int i, j;
 		for(i = t->events_wp, j = s->events_wp; i >= 0; i--) {
 			t->events[i] = s->events[j];
@@ -57,6 +68,15 @@ struct snapshot *snapshot_clone(struct snapshot *s)
 		t->amps_wp = t->amps_count - 1;
 		t->amps = malloc(t->amps_count * sizeof(*t->amps));
 		t->amps_time = malloc(t->amps_count * sizeof(*t->amps_time));
+		if(!t->amps || !t->amps_time) {
+			free(t->amps);
+			free(t->amps_time);
+			free(t->events);
+			free(t->events_tictoc);
+			if(t->pb) pb_destroy_clone(t->pb);
+			free(t);
+			return NULL;
+		}
 		int i, j;
 		for(i = t->amps_wp, j = s->amps_wp; i >= 0; i--) {
 			t->amps[i] = s->amps[j];
@@ -108,9 +128,10 @@ static void compute_update_cal(struct computer *c)
 	}
 	c->actv->cal_state = c->cdata->state;
 	c->actv->cal_percent = 100*c->cdata->wp/c->cdata->size;
-	if(c->cdata->state == 1)
+	if(c->cdata->state == 1) {
 		c->actv->cal_result = round(10 * c->cdata->calibration);
-	else if(c->cdata->state == -1) {
+		c->actv->cal_sigma = 0;
+	} else if(c->cdata->state == -1) {
 		/* Expose the computed value and its uncertainty so the display
 		 * can show the user why the calibration failed. */
 		c->actv->cal_result = round(10 * c->cdata->calibration);
@@ -209,7 +230,8 @@ static void *computing_thread(void *void_computer)
 		pthread_mutex_lock(&c->mutex);
 			while(!c->recompute)
 				pthread_cond_wait(&c->cond, &c->mutex);
-			if(c->recompute > 0) c->recompute = 0;
+			int recompute = c->recompute;
+			if(recompute > 0) c->recompute = 0;
 			int calibrate = c->calibrate;
 			c->actv->bph = c->bph;
 			c->actv->la = c->la;
@@ -217,7 +239,7 @@ static void *computing_thread(void *void_computer)
 			void *callback_data = c->callback_data;
 		pthread_mutex_unlock(&c->mutex);
 
-		if(c->recompute < 0) {
+		if(recompute < 0) {
 			if(callback) callback(callback_data);
 			break;
 		}
@@ -255,7 +277,7 @@ static void *computing_thread(void *void_computer)
 				double raw_amp = c->actv->pb->amp;
 				if(raw_amp > 0) {
 					c->amp_history = c->amp_history > 0
-						? 0.8 * c->amp_history + 0.2 * raw_amp
+						? (1 - EMA_ALPHA_AMPLITUDE) * c->amp_history + EMA_ALPHA_AMPLITUDE * raw_amp
 						: raw_amp;
 					c->actv->pb->amp = c->amp_history;
 				} else if(c->amp_history > 0) {
@@ -263,14 +285,14 @@ static void *computing_thread(void *void_computer)
 				}
 				/* Period EMA: smooths rate display against single-cycle spikes. */
 				c->rate_history = c->rate_history > 0
-					? 0.85 * c->rate_history + 0.15 * c->actv->pb->period
+					? (1 - EMA_ALPHA_RATE) * c->rate_history + EMA_ALPHA_RATE * c->actv->pb->period
 					: c->actv->pb->period;
 				c->actv->pb->period = c->rate_history;
 			/* Beat error EMA: damps threshold jitter (alpha=0.4, ~2-frame avg).
 				 * Values are unbiased since smooth_classic() is used for pulse
 				 * detection in both algorithm modes, so averaging does not drift. */
 				c->be_history = c->be_history != 0
-					? 0.6 * c->be_history + 0.4 * c->actv->pb->be
+					? (1 - EMA_ALPHA_BE) * c->be_history + EMA_ALPHA_BE * c->actv->pb->be
 					: c->actv->pb->be;
 				c->actv->pb->be = c->be_history;
 			}
@@ -305,6 +327,8 @@ static void *computing_thread(void *void_computer)
 void computer_destroy(struct computer *c)
 {
 	int i;
+	/* Make sure the thread is fully gone before freeing anything it uses. */
+	pthread_join(c->thread, NULL);
 	for(i=0; i<NSTEPS; i++)
 		pb_destroy(&c->pdata->buffers[i]);
 	free(c->pdata->buffers);
@@ -316,7 +340,6 @@ void computer_destroy(struct computer *c)
 		snapshot_destroy(c->curr);
 	pthread_mutex_destroy(&c->mutex);
 	pthread_cond_destroy(&c->cond);
-	pthread_join(c->thread, NULL);
 	free(c);
 }
 
@@ -342,7 +365,7 @@ struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int
 	for(i=0; i<NSTEPS; i++) {
 		p[i].sample_rate = nominal_sr;
 		p[i].sample_count = nominal_sr * (1<<(i+first_step));
-		setup_buffers(&p[i]);
+		if(setup_buffers(&p[i])) goto error;
 		initialized_buffers++;
 	}
 
@@ -355,7 +378,7 @@ struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int
 
 	cd = malloc(sizeof(struct calibration_data));
 	if(!cd) goto error;
-	setup_cal_data(cd);
+	if(setup_cal_data(cd)) goto error;
 
 	s = calloc(1, sizeof(struct snapshot));
 	if(!s) goto error;

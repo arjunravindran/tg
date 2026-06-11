@@ -69,8 +69,11 @@ static void run_filter(struct filter *f, float *buff, int size)
 	}
 }
 
-void setup_buffers(struct processing_buffers *b)
+int setup_buffers(struct processing_buffers *b)
 {
+	/* Plans must be NULL before any failure so pb_destroy() can run safely. */
+	b->plan_a = b->plan_b = b->plan_c = b->plan_d = NULL;
+	b->plan_e = b->plan_f = b->plan_g = NULL;
 	b->samples = fftwf_malloc(2 * b->sample_count * sizeof(float));
 	b->samples_sc = malloc(2 * b->sample_count * sizeof(float));
 	b->waveform = malloc(2 * b->sample_rate * sizeof(float));
@@ -82,6 +85,22 @@ void setup_buffers(struct processing_buffers *b)
 	b->tic_fft = fftwf_malloc((b->sample_rate/2 + 1) * sizeof(fftwf_complex));
 	b->slice_fft = fftwf_malloc((b->sample_rate/2 + 1) * sizeof(fftwf_complex));
 	b->tic_c = malloc(2 * b->sample_count * sizeof(float));
+	b->hpf = malloc(sizeof(struct filter));
+	b->lpf = malloc(sizeof(struct filter));
+	b->events = malloc(EVENTS_MAX * sizeof(uint64_t));
+	b->events_tictoc = malloc(EVENTS_MAX * sizeof(unsigned char));
+#ifdef DEBUG
+	b->debug_size = b->sample_count;
+	b->debug = fftwf_malloc(b->debug_size * sizeof(float));
+#endif
+	if(!b->samples || !b->samples_sc || !b->waveform || !b->waveform_sc ||
+	   !b->fft || !b->sc_fft || !b->tic_wf || !b->slice_wf ||
+	   !b->tic_fft || !b->slice_fft || !b->tic_c ||
+	   !b->hpf || !b->lpf || !b->events || !b->events_tictoc)
+		goto fail;
+#ifdef DEBUG
+	if(!b->debug) goto fail;
+#endif
 	b->plan_a = fftwf_plan_dft_r2c_1d(2 * b->sample_count, b->samples, b->fft, FFTW_ESTIMATE);
 	b->plan_b = fftwf_plan_dft_c2r_1d(2 * b->sample_count, b->sc_fft, b->samples_sc, FFTW_ESTIMATE);
 	b->plan_c = fftwf_plan_dft_r2c_1d(2 * b->sample_rate, b->waveform, b->sc_fft, FFTW_ESTIMATE);
@@ -89,18 +108,19 @@ void setup_buffers(struct processing_buffers *b)
 	b->plan_e = fftwf_plan_dft_r2c_1d(b->sample_rate, b->tic_wf, b->tic_fft, FFTW_ESTIMATE);
 	b->plan_f = fftwf_plan_dft_r2c_1d(b->sample_rate, b->slice_wf, b->slice_fft, FFTW_ESTIMATE);
 	b->plan_g = fftwf_plan_dft_c2r_1d(b->sample_rate, b->slice_fft, b->slice_wf, FFTW_ESTIMATE);
-	b->hpf = malloc(sizeof(struct filter));
+	if(!b->plan_a || !b->plan_b || !b->plan_c || !b->plan_d ||
+	   !b->plan_e || !b->plan_f || !b->plan_g)
+		goto fail;
 	make_hp(b->hpf,(double)FILTER_CUTOFF/b->sample_rate);
-	b->lpf = malloc(sizeof(struct filter));
 	make_lp(b->lpf,(double)FILTER_CUTOFF/b->sample_rate);
-	b->events = malloc(EVENTS_MAX * sizeof(uint64_t));
-	b->events_tictoc = malloc(EVENTS_MAX * sizeof(unsigned char));
 	b->amp_history = 0;
 	b->ready = 0;
-#ifdef DEBUG
-	b->debug_size = b->sample_count;
-	b->debug = fftwf_malloc(b->debug_size * sizeof(float));
-#endif
+	return 0;
+
+fail:
+	error("Memory allocation failed in setup_buffers");
+	pb_destroy(b);
+	return 1;
 }
 
 void pb_destroy(struct processing_buffers *b)
@@ -116,13 +136,13 @@ void pb_destroy(struct processing_buffers *b)
 	fftwf_free(b->tic_fft);
 	fftwf_free(b->slice_fft);
 	free(b->tic_c);
-	fftwf_destroy_plan(b->plan_a);
-	fftwf_destroy_plan(b->plan_b);
-	fftwf_destroy_plan(b->plan_c);
-	fftwf_destroy_plan(b->plan_d);
-	fftwf_destroy_plan(b->plan_e);
-	fftwf_destroy_plan(b->plan_f);
-	fftwf_destroy_plan(b->plan_g);
+	if(b->plan_a) fftwf_destroy_plan(b->plan_a);
+	if(b->plan_b) fftwf_destroy_plan(b->plan_b);
+	if(b->plan_c) fftwf_destroy_plan(b->plan_c);
+	if(b->plan_d) fftwf_destroy_plan(b->plan_d);
+	if(b->plan_e) fftwf_destroy_plan(b->plan_e);
+	if(b->plan_f) fftwf_destroy_plan(b->plan_f);
+	if(b->plan_g) fftwf_destroy_plan(b->plan_g);
 	free(b->hpf);
 	free(b->lpf);
 	free(b->events);
@@ -134,17 +154,27 @@ void pb_destroy(struct processing_buffers *b)
 
 struct processing_buffers *pb_clone(struct processing_buffers *p)
 {
+	if(!p) return NULL;
 	struct processing_buffers *new = malloc(sizeof(struct processing_buffers));
+	if(!new) return NULL;
+	new->events = NULL;
+	new->events_tictoc = NULL;
+#ifdef DEBUG
+	new->debug = NULL;
+#endif
 	new->sample_count = ceil(p->period);
 	new->waveform = malloc(new->sample_count * sizeof(float));
+	if(!new->waveform) { free(new); return NULL; }
 	memcpy(new->waveform, p->waveform, new->sample_count * sizeof(float));
 	if(p->events) {
 		new->events = malloc(EVENTS_MAX * sizeof(uint64_t));
+		if(!new->events) goto fail;
 		memcpy(new->events, p->events, EVENTS_MAX * sizeof(uint64_t));
 	} else
 		new->events = NULL;
 	if(p->events_tictoc) {
 		new->events_tictoc = malloc(EVENTS_MAX * sizeof(unsigned char));
+		if(!new->events_tictoc) goto fail;
 		memcpy(new->events_tictoc, p->events_tictoc, EVENTS_MAX * sizeof(unsigned char));
 	} else
 		new->events_tictoc = NULL;
@@ -153,6 +183,7 @@ struct processing_buffers *pb_clone(struct processing_buffers *p)
 	new->debug_size = p->debug_size;
 	if(p->debug) {
 		new->debug = malloc(new->debug_size * sizeof(float));
+		if(!new->debug) goto fail;
 		memcpy(new->debug, p->debug, new->debug_size * sizeof(float));
 	} else
 		new->debug = NULL;
@@ -171,6 +202,16 @@ struct processing_buffers *pb_clone(struct processing_buffers *p)
 	new->ready = p->ready;
 	new->timestamp = p->timestamp;
 	return new;
+
+fail:
+	free(new->waveform);
+	free(new->events);
+	free(new->events_tictoc);
+#ifdef DEBUG
+	free(new->debug);
+#endif
+	free(new);
+	return NULL;
 }
 
 void pb_destroy_clone(struct processing_buffers *p)
@@ -856,7 +897,7 @@ static void compute_amplitude(struct processing_buffers *p, double la)
 		j = floor(fmod((k ? p->tic : p->toc) + p->period/8, p->period));
 		for(i = 0; i < p->period/8; i++) {
 			if(smooth_wf[j] > max) max = smooth_wf[j];
-			if(++j > p->period) j = 0;
+			if(++j >= wf_size) j = 0;
 		}
 	}
 	double glob_max = vmax(smooth_wf, 0, ceil(p->period), NULL);
@@ -874,13 +915,13 @@ static void compute_amplitude(struct processing_buffers *p, double la)
 			j = floor(fmod((k ? p->tic : p->toc) + 7*p->period/8, p->period));
 			for(i = 0; i < p->period/8; i++) {
 				if(smooth_wf[j] > threshold) break;
-				if(++j > p->period) j = 0;
+				if(++j >= wf_size) j = 0;
 			}
 			for(; i < p->period/8; i++) {
 				double x = smooth_wf[j];
 				if(x > max) max = x;
 				else break;
-				if(++j > p->period) j = 0;
+				if(++j >= wf_size) j = 0;
 			}
 			if(i < p->period/8) {
 				double pulse = p->period/8 - i - 1;
@@ -913,13 +954,17 @@ next_threshold:	threshold *= 1.4;
 	free(smooth_wf);
 }
 
-void setup_cal_data(struct calibration_data *cd)
+int setup_cal_data(struct calibration_data *cd)
 {
 	cd->size = CAL_DATA_SIZE;
 	cd->delta = 0;
 	cd->times = malloc(cd->size * sizeof(double));
+	if(!cd->times) { error("Memory allocation failed in setup_cal_data (times)"); return 1; }
 	cd->phases = malloc(cd->size * sizeof(double));
+	if(!cd->phases) { error("Memory allocation failed in setup_cal_data (phases)"); return 1; }
 	cd->events = malloc(cd->size * sizeof(uint64_t));
+	if(!cd->events) { error("Memory allocation failed in setup_cal_data (events)"); return 1; }
+	return 0;
 }
 
 void cal_data_destroy(struct calibration_data *cd)

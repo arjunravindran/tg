@@ -194,7 +194,10 @@ static int scan_string(FILE *f, char **s, uint64_t max_l, uint64_t *len)
 	int n = 0;
 	if(1 != fscanf(f, " S%"SCNu64";%n", &l, &n) || !n) return 1;
 	if(max_l && l >= max_l) return 1;
-	if(!*s) *s = malloc(l+1);
+	if(!*s) {
+		*s = malloc(l+1);
+		if(!*s) return 1;
+	}
 	if(l+1 != fread(*s, 1, l+1, f)) return 1;
 	if((*s)[l] != ';') return 1;
 	(*s)[l] = 0;
@@ -217,7 +220,10 @@ static int scan_uint64_t_array(FILE *f, uint64_t **a, uint64_t max_l, uint64_t *
 	int n = 0;
 	if(1 != fscanf(f, " A%"SCNu64";%n", &l, &n) || !n) return 1;
 	if(max_l && l > max_l) return 1;
-	if(!*a) *a = malloc(l*sizeof(uint64_t));
+	if(!*a) {
+		*a = malloc(l*sizeof(uint64_t));
+		if(!*a) return 1;
+	}
 	for(i = 0; i < l; i++)
 		if(scan_uint64_t(f, *a+i)) return 1;
 	if(len) *len = l;
@@ -239,7 +245,10 @@ static int scan_bool_array(FILE *f, unsigned char **a, uint64_t max_l, uint64_t 
 	int n = 0;
 	if(1 != fscanf(f, " A%"SCNu64";%n", &l, &n) || !n) return 1;
 	if(max_l && l > max_l) return 1;
-	if(!*a) *a = malloc(l*sizeof(**a));
+	if(!*a) {
+		*a = malloc(l*sizeof(**a));
+		if(!*a) return 1;
+	}
 	for(i = 0; i < l; i++) {
 		int j;
 		if(scan_int(f, &j)) return 1;
@@ -264,7 +273,10 @@ static int scan_float_array(FILE *f, float **a, uint64_t max_l, uint64_t *len)
 	int n = 0;
 	if(1 != fscanf(f, " A%"SCNu64";%n", &l, &n) || !n) return 1;
 	if(max_l && l > max_l) return 1;
-	if(!*a) *a = malloc(l*sizeof(float));
+	if(!*a) {
+		*a = malloc(l*sizeof(float));
+		if(!*a) return 1;
+	}
 	for(i = 0; i < l; i++)
 		if(scan_float(f, *a+i)) return 1;
 	if(len) *len = l;
@@ -397,6 +409,7 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 {
 	char l[LABEL_SIZE+1];
 	int n = 0;
+	uint64_t tictoc_len = 0, amps_time_len = 0;
 	*s = NULL;
 	*name = NULL;
 	if(0 != fscanf(f, " U;%n", &n) || !n) return 1;
@@ -439,9 +452,8 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 		}
 		if(!strcmp("events_tictoc", l)) {
 			debug("serializer: scanning events_tictoc\n");
-			uint64_t x;
 			if(	(*s)->events_tictoc ||
-				scan_bool_array(f, &((*s)->events_tictoc), INT_MAX, &x)) goto error;
+				scan_bool_array(f, &((*s)->events_tictoc), INT_MAX, &tictoc_len)) goto error;
 			continue;
 		}
 		if(!strcmp("amps", l)) {
@@ -454,9 +466,8 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 		}
 		if(!strcmp("amps_time", l)) {
 			debug("serializer: scanning amps_time\n");
-			uint64_t x;
 			if(	(*s)->amps_time ||
-				scan_uint64_t_array(f, &((*s)->amps_time), INT_MAX, &x)) goto error;
+				scan_uint64_t_array(f, &((*s)->amps_time), INT_MAX, &amps_time_len)) goto error;
 			continue;
 		}
 		SCAN(int,pb->sample_rate);
@@ -499,10 +510,13 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 	debug("serializer: checking cal\n");
 	if((*s)->cal < MIN_CAL || (*s)->cal > MAX_CAL) goto error;
 	debug("serializer: checking events\n");
-	if((*s)->events_count && (*s)->events_wp >= (*s)->events_count) goto error;
+	if((*s)->events_count && ((*s)->events_wp < 0 || (*s)->events_wp >= (*s)->events_count)) goto error;
 	if((*s)->signal > NSTEPS) (*s)->signal = NSTEPS;
 	debug("serializer: checking events_tictoc\n");
 	if((*s)->events_tictoc && (*s)->events_count && !(*s)->events)
+		goto error;
+	/* The tictoc array, if present, must cover every event. */
+	if((*s)->events_tictoc && tictoc_len != (uint64_t)(*s)->events_count)
 		goto error;
 	if(!(*s)->events_tictoc && (*s)->events_count)
 		(*s)->events_tictoc = calloc((*s)->events_count, sizeof(*(*s)->events_tictoc));
@@ -521,11 +535,14 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 	debug("serializer: checking amplitudes\n");
 	if((*s)->amps && (*s)->amps_count && !(*s)->amps_time)
 		goto error;
+	/* The timestamp array, if present, must cover every amplitude sample. */
+	if((*s)->amps_time && amps_time_len != (uint64_t)(*s)->amps_count)
+		goto error;
 	if(!(*s)->amps) {
 		(*s)->amps_count = 0;
 		(*s)->amps_wp = 0;
 	}
-	if((*s)->amps_count && (*s)->amps_wp >= (*s)->amps_count)
+	if((*s)->amps_count && ((*s)->amps_wp < 0 || (*s)->amps_wp >= (*s)->amps_count))
 		goto error;
 	(*s)->pb->events = NULL;
 #ifdef DEBUG

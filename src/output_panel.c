@@ -949,7 +949,7 @@ static gboolean balance_wheel_draw_event(GtkWidget *widget, cairo_t *cr, struct 
 	double cx = width  / 2.0;
 	double cy = height / 2.0;
 	int size   = width < height ? width : height;
-	double scale = size / 2.70;
+	double scale = size / BALANCE_WHEEL_SCALE;
 
 	/* calibrating → simple label */
 	if(snst->calibrate) {
@@ -1383,6 +1383,8 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	gtk_box_pack_start(GTK_BOX(vbox3), op->balance_wheel_area, TRUE, TRUE, 0);
 	g_signal_connect(op->balance_wheel_area, "draw", G_CALLBACK(balance_wheel_draw_event), op);
 	gtk_widget_set_events(op->balance_wheel_area, GDK_EXPOSURE_MASK);
+	/* Keep gtk_widget_show_all() from re-showing this; only the toggle shows it. */
+	gtk_widget_set_no_show_all(op->balance_wheel_area, TRUE);
 	gtk_widget_hide(op->balance_wheel_area);
 	op->wheel_view = 0;
 

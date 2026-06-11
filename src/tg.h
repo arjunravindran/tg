@@ -36,6 +36,11 @@
 
 #define FILTER_CUTOFF 3000
 
+#define BALANCE_WHEEL_SCALE 2.70	// scale = size / BALANCE_WHEEL_SCALE keeps degree labels within bounds
+#define EMA_ALPHA_AMPLITUDE 0.2		// amplitude EMA smoothing factor
+#define EMA_ALPHA_RATE 0.15			// period/rate EMA smoothing factor
+#define EMA_ALPHA_BE 0.4			// beat error EMA smoothing factor (damps threshold jitter)
+
 #define CAL_DATA_SIZE 900
 
 #define FIRST_STEP 1
@@ -115,12 +120,12 @@ struct calibration_data {
 	uint64_t *events;
 };
 
-void setup_buffers(struct processing_buffers *b);
+int setup_buffers(struct processing_buffers *b);
 void pb_destroy(struct processing_buffers *b);
 struct processing_buffers *pb_clone(struct processing_buffers *p);
 void pb_destroy_clone(struct processing_buffers *p);
 void process(struct processing_buffers *p, int bph, double la, int light);
-void setup_cal_data(struct calibration_data *cd);
+int setup_cal_data(struct calibration_data *cd);
 void cal_data_destroy(struct calibration_data *cd);
 int test_cal(struct processing_buffers *p);
 int process_cal(struct processing_buffers *p, struct calibration_data *cd);
@@ -269,6 +274,10 @@ struct main_window {
 	GtkWidget *save_item;
 	GtkWidget *save_all_item;
 	GtkWidget *close_all_item;
+	GtkWidget *stats_label;		//< displays real-time statistics
+	GtkWidget *alert_indicator;	//< visual alert indicator
+	GtkWidget *min_rate_spin;	//< min acceptable rate (s/day)
+	GtkWidget *max_rate_spin;	//< max acceptable rate (s/day)
 	struct output_panel *active_panel;
 
 	struct computer *computer;
@@ -286,6 +295,18 @@ struct main_window {
 	int cal; // 0.1 s/d
 	int nominal_sr;
 	int restart_audio;
+
+	int alert_min_rate;		//< minimum acceptable rate (0.1 s/day)
+	int alert_max_rate;		//< maximum acceptable rate (0.1 s/day)
+	int alerts_enabled;		//< 1 = alerts on, 0 = alerts off
+	int out_of_bounds;		//< 1 = current measurement out of bounds
+
+	double rate_history[50];	//< rolling window of last 50 rate measurements
+	double be_history_rolling[50];	//< rolling window of last 50 beat error measurements
+	int history_count;		//< number of measurements in rolling window
+
+	guint autosave_timeout;		//< timer for auto-save
+	int autosaved_count;		//< number of auto-saved snapshots in current session
 
 	GKeyFile *config_file;
 	gchar *config_file_name;
@@ -312,7 +333,10 @@ void error(char *format,...);
 	OP(light_algorithm, is_light, int) \
 	OP(audio_device, audio_device, int) \
 	OP(audio_rate, nominal_sr, int) \
-	OP(algo_classic, algo_classic, int)
+	OP(algo_classic, algo_classic, int) \
+	OP(alert_min_rate, alert_min_rate, int) \
+	OP(alert_max_rate, alert_max_rate, int) \
+	OP(alerts_enabled, alerts_enabled, int)
 
 struct conf_data {
 #define DEF(NAME,PLACE,TYPE) TYPE PLACE;

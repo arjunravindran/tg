@@ -380,6 +380,18 @@ static void handle_algo_change(GtkComboBox *b, struct main_window *w)
 	}
 }
 
+static void handle_alert_min_change(GtkSpinButton *b, struct main_window *w)
+{
+	if(!w->controls_active) return;
+	w->alert_min_rate = (int)(gtk_spin_button_get_value(b) * 10);
+}
+
+static void handle_alert_max_change(GtkSpinButton *b, struct main_window *w)
+{
+	if(!w->controls_active) return;
+	w->alert_max_rate = (int)(gtk_spin_button_get_value(b) * 10);
+}
+
 static void controls_active(struct main_window *w, int active)
 {
 	w->controls_active = active;
@@ -813,6 +825,70 @@ static void load(GtkMenuItem *m, struct main_window *w)
 	gtk_widget_destroy(dialog);
 }
 
+static void update_stats_display(struct main_window *w)
+{
+	if(!w->stats_label) return;
+
+	if(w->history_count == 0) {
+		gtk_label_set_text(GTK_LABEL(w->stats_label), "Collecting measurements...");
+		return;
+	}
+
+	double rate_sum = 0, rate_sq_sum = 0;
+	double be_sum = 0, be_sq_sum = 0;
+	for(int i = 0; i < w->history_count; i++) {
+		rate_sum += w->rate_history[i];
+		rate_sq_sum += w->rate_history[i] * w->rate_history[i];
+		be_sum += w->be_history_rolling[i];
+		be_sq_sum += w->be_history_rolling[i] * w->be_history_rolling[i];
+	}
+
+	double rate_mean = rate_sum / w->history_count;
+	double be_mean = be_sum / w->history_count;
+	double rate_sigma = sqrt(rate_sq_sum / w->history_count - rate_mean * rate_mean);
+	double be_sigma = sqrt(be_sq_sum / w->history_count - be_mean * be_mean);
+
+	char stats_text[256];
+	snprintf(stats_text, sizeof(stats_text),
+		"<b>Statistics (n=%d)</b>\n"
+		"Rate: %.2f ± %.2f s/day\n"
+		"Beat Error: %.3f ± %.3f ms",
+		w->history_count, rate_mean, rate_sigma, be_mean, be_sigma);
+	gtk_label_set_markup(GTK_LABEL(w->stats_label), stats_text);
+}
+
+static guint autosave_timer(struct main_window *w)
+{
+	if(w->zombie || w->active_snapshot->calibrate) return TRUE;
+
+	struct snapshot *s = snapshot_clone(w->active_snapshot);
+	if(!s) return TRUE;
+
+	s->timestamp = get_timestamp(s->is_light);
+	GDateTime *dt = g_date_time_new_now_local();
+	char *name = dt ? g_date_time_format(dt, "Auto %H:%M:%S") : NULL;
+	if(dt) g_date_time_unref(dt);
+
+	add_new_tab(s, name, w);
+	g_free(name);
+
+	w->autosaved_count++;
+	if(w->autosaved_count > 10) {
+		int pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(w->notebook));
+		for(int i = 1; i < pages; i++) {
+			GtkWidget *tab = gtk_notebook_get_nth_page(GTK_NOTEBOOK(w->notebook), i);
+			struct output_panel *op = g_object_get_data(G_OBJECT(tab), "op-pointer");
+			if(op) {
+				gtk_widget_destroy(tab);
+				w->autosaved_count--;
+				break;
+			}
+		}
+	}
+
+	return TRUE;
+}
+
 /* Set up the main window and populate with widgets */
 static void init_main_window(struct main_window *w)
 {
@@ -963,6 +1039,25 @@ static void init_main_window(struct main_window *w)
 	g_signal_connect(w->cal_spin_button, "input", G_CALLBACK(input_cal), NULL);
 	gtk_widget_set_tooltip_text(w->cal_spin_button, "Calibration correction in seconds per day (+3.5 means the watch runs 3.5 s/day fast)");
 
+	// Alert rate bounds
+	label = gtk_label_new("alert");
+	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+
+	w->min_rate_spin = gtk_spin_button_new_with_range(-500, 500, 1);
+	gtk_box_pack_start(GTK_BOX(hbox), w->min_rate_spin, FALSE, FALSE, 0);
+	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->min_rate_spin), w->alert_min_rate / 10.0);
+	g_signal_connect(w->min_rate_spin, "value_changed", G_CALLBACK(handle_alert_min_change), w);
+	gtk_widget_set_tooltip_text(w->min_rate_spin, "Minimum acceptable rate (s/day)");
+
+	w->max_rate_spin = gtk_spin_button_new_with_range(-500, 500, 1);
+	gtk_box_pack_start(GTK_BOX(hbox), w->max_rate_spin, FALSE, FALSE, 0);
+	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->max_rate_spin), w->alert_max_rate / 10.0);
+	g_signal_connect(w->max_rate_spin, "value_changed", G_CALLBACK(handle_alert_max_change), w);
+	gtk_widget_set_tooltip_text(w->max_rate_spin, "Maximum acceptable rate (s/day)");
+
+	w->alert_indicator = gtk_label_new("✓");
+	gtk_box_pack_start(GTK_BOX(hbox), w->alert_indicator, FALSE, FALSE, 0);
+
 	// Is there a more elegant way?
 	GtkWidget *empty = gtk_label_new("");
 	gtk_box_pack_start(GTK_BOX(hbox), empty, TRUE, FALSE, 0);
@@ -1069,6 +1164,16 @@ static void init_main_window(struct main_window *w)
 	gtk_notebook_append_page(GTK_NOTEBOOK(w->notebook), w->active_panel->panel, tab_label);
 	gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(w->notebook), w->active_panel->panel, TRUE);
 
+	// Stats tab
+	GtkWidget *stats_panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 20);
+	gtk_container_set_border_width(GTK_CONTAINER(stats_panel), 20);
+	w->stats_label = gtk_label_new("Collecting measurements...");
+	gtk_label_set_line_wrap(GTK_LABEL(w->stats_label), TRUE);
+	gtk_box_pack_start(GTK_BOX(stats_panel), w->stats_label, FALSE, FALSE, 0);
+	gtk_widget_show_all(stats_panel);
+	GtkWidget *stats_tab_label = gtk_label_new("Stats");
+	gtk_notebook_append_page(GTK_NOTEBOOK(w->notebook), stats_panel, stats_tab_label);
+
 	gtk_window_maximize(GTK_WINDOW(w->window));
 	gtk_widget_show_all(w->window);
 	gtk_widget_hide(w->snapshot_name);
@@ -1108,6 +1213,36 @@ guint refresh(struct main_window *w)
 	refresh_results(w);
 	op_set_snapshot(w->active_panel, w->active_snapshot);
 
+	/* Update rolling window of measurements for statistics */
+	if(!w->active_snapshot->calibrate && w->active_snapshot->pb) {
+		double rate_s_per_day = w->active_snapshot->rate * 86400.0 / w->active_snapshot->sample_rate;
+		double be_ms = w->active_snapshot->be * 1000.0 / w->active_snapshot->sample_rate;
+
+		if(w->history_count < 50) {
+			w->rate_history[w->history_count] = rate_s_per_day;
+			w->be_history_rolling[w->history_count] = be_ms;
+			w->history_count++;
+		} else {
+			for(int i = 0; i < 49; i++) {
+				w->rate_history[i] = w->rate_history[i + 1];
+				w->be_history_rolling[i] = w->be_history_rolling[i + 1];
+			}
+			w->rate_history[49] = rate_s_per_day;
+			w->be_history_rolling[49] = be_ms;
+		}
+
+		/* Check alert bounds */
+		int rate_scaled = (int)(rate_s_per_day * 10);
+		w->out_of_bounds = (rate_scaled < w->alert_min_rate || rate_scaled > w->alert_max_rate);
+
+		/* Update alert indicator */
+		if(w->alerts_enabled) {
+			gtk_label_set_text(GTK_LABEL(w->alert_indicator), w->out_of_bounds ? "⚠" : "✓");
+		}
+
+		update_stats_display(w);
+	}
+
 	int p = gtk_notebook_get_current_page(GTK_NOTEBOOK(w->notebook));
 	GtkWidget *panel = gtk_notebook_get_nth_page(GTK_NOTEBOOK(w->notebook), p);
 	int photogenic = 0;
@@ -1146,6 +1281,13 @@ static void start_interface(GApplication* app, void *p)
 	w->nominal_sr = PA_SAMPLE_RATE;
 	w->audio_device = AUDIO_DEVICE_DEFAULT;
 	w->restart_audio = 0;
+
+	w->alert_min_rate = -50;
+	w->alert_max_rate = 50;
+	w->alerts_enabled = 1;
+	w->out_of_bounds = 0;
+	w->history_count = 0;
+	w->autosaved_count = 0;
 
 	load_config(w);
 	set_audio_input_device(w->audio_device);
@@ -1212,6 +1354,7 @@ static void start_interface(GApplication* app, void *p)
 
 	w->kick_timeout = g_timeout_add_full(G_PRIORITY_LOW,100,(GSourceFunc)kick_computer,w,NULL);
 	w->save_timeout = g_timeout_add_full(G_PRIORITY_LOW,10000,(GSourceFunc)save_on_change_timer,w,NULL);
+	w->autosave_timeout = g_timeout_add_full(G_PRIORITY_LOW,300000,(GSourceFunc)autosave_timer,w,NULL);
 #ifdef DEBUG
 	if(testing)
 		g_timeout_add_full(G_PRIORITY_LOW,3000,(GSourceFunc)quit,w,NULL);
