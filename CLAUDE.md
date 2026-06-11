@@ -43,7 +43,7 @@ GTK drawing area callbacks render all visualisations using Cairo:
 - `handle_view_toggle()` — switches visibility between `classic_panel_box` and `balance_wheel_area`
 
 ### src/interface.c
-GTK application shell. Builds the toolbar (BPH combo, audio device, sample rate, lift angle, calibration, algorithm selector). `recompute()` kills and restarts the computer thread when settings change; it compares `w->algo_classic` vs `w->computer->algo_classic` to detect algorithm switches.
+GTK application shell. Builds the toolbar (BPH combo, audio device, sample rate, lift angle, calibration, algorithm selector). `recompute()` kills and restarts the computer thread when settings change; it compares `w->algo_classic` vs `w->computer->algo_classic` to detect algorithm switches. `start_interface()` validates the loaded sample rate from config against the supported list (22050, 32000, 44100, 48000, 96000 Hz) and resets to default (44100 Hz) if invalid, preventing startup failures from stale/corrupt configs.
 
 ### src/config.c
 Reads/writes `tg-timer.ini` via GKeyFile. Fields are declared with the `CONFIG_FIELDS(OP)` macro in `tg.h`.
