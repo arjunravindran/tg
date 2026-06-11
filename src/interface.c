@@ -1150,9 +1150,13 @@ static void init_main_window(struct main_window *w)
 
 	gtk_widget_show_all(command_menu);
 
+	// Main content: tabs and side panel
+	GtkWidget *content_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+	gtk_box_pack_start(GTK_BOX(vbox), content_hbox, TRUE, TRUE, 0);
+
 	// The tabs' container
 	w->notebook = gtk_notebook_new();
-	gtk_box_pack_start(GTK_BOX(vbox), w->notebook, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(content_hbox), w->notebook, TRUE, TRUE, 0);
 	gtk_notebook_set_scrollable(GTK_NOTEBOOK(w->notebook), TRUE);
 	gtk_notebook_set_show_tabs(GTK_NOTEBOOK(w->notebook), FALSE);
 	gtk_notebook_set_show_border(GTK_NOTEBOOK(w->notebook), FALSE);
@@ -1164,24 +1168,31 @@ static void init_main_window(struct main_window *w)
 	gtk_notebook_append_page(GTK_NOTEBOOK(w->notebook), w->active_panel->panel, tab_label);
 	gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(w->notebook), w->active_panel->panel, TRUE);
 
-	// Stats tab
-	GtkWidget *stats_panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 40);
-	gtk_container_set_border_width(GTK_CONTAINER(stats_panel), 40);
+	// Stats side panel
+	GtkWidget *stats_panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 15);
+	gtk_container_set_border_width(GTK_CONTAINER(stats_panel), 15);
 	gtk_box_set_homogeneous(GTK_BOX(stats_panel), FALSE);
+	gtk_widget_set_size_request(stats_panel, 280, -1);
 
-	w->stats_label = gtk_label_new("Collecting measurements...");
+	GtkWidget *stats_title = gtk_label_new("Statistics");
+	PangoAttrList *title_attrs = pango_attr_list_new();
+	PangoAttribute *title_size = pango_attr_size_new(16 * 1024);
+	pango_attr_list_insert(title_attrs, title_size);
+	gtk_label_set_attributes(GTK_LABEL(stats_title), title_attrs);
+	pango_attr_list_unref(title_attrs);
+	gtk_box_pack_start(GTK_BOX(stats_panel), stats_title, FALSE, FALSE, 0);
+
+	w->stats_label = gtk_label_new("Collecting...");
 	gtk_label_set_line_wrap(GTK_LABEL(w->stats_label), TRUE);
-	gtk_label_set_justify(GTK_LABEL(w->stats_label), GTK_JUSTIFY_CENTER);
+	gtk_label_set_justify(GTK_LABEL(w->stats_label), GTK_JUSTIFY_LEFT);
 	PangoAttrList *attrs = pango_attr_list_new();
-	PangoAttribute *size_attr = pango_attr_size_new(24 * 1024);
+	PangoAttribute *size_attr = pango_attr_size_new(11 * 1024);
 	pango_attr_list_insert(attrs, size_attr);
 	gtk_label_set_attributes(GTK_LABEL(w->stats_label), attrs);
 	pango_attr_list_unref(attrs);
 
-	gtk_box_pack_start(GTK_BOX(stats_panel), w->stats_label, TRUE, TRUE, 20);
-	gtk_widget_show_all(stats_panel);
-	GtkWidget *stats_tab_label = gtk_label_new("Stats");
-	gtk_notebook_append_page(GTK_NOTEBOOK(w->notebook), stats_panel, stats_tab_label);
+	gtk_box_pack_start(GTK_BOX(stats_panel), w->stats_label, TRUE, TRUE, 10);
+	gtk_box_pack_end(GTK_BOX(content_hbox), stats_panel, FALSE, TRUE, 0);
 
 	gtk_window_maximize(GTK_WINDOW(w->window));
 	gtk_widget_show_all(w->window);
