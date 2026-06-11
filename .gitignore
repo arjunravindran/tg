@@ -49,3 +49,8 @@ Makefile.in
 # build directories
 /deb
 /msi
+
+# Runtime dependencies (built/distributed separately)
+*.dll
+/share
+/lib
