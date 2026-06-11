@@ -1165,11 +1165,20 @@ static void init_main_window(struct main_window *w)
 	gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(w->notebook), w->active_panel->panel, TRUE);
 
 	// Stats tab
-	GtkWidget *stats_panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 20);
-	gtk_container_set_border_width(GTK_CONTAINER(stats_panel), 20);
+	GtkWidget *stats_panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 40);
+	gtk_container_set_border_width(GTK_CONTAINER(stats_panel), 40);
+	gtk_box_set_homogeneous(GTK_BOX(stats_panel), FALSE);
+
 	w->stats_label = gtk_label_new("Collecting measurements...");
 	gtk_label_set_line_wrap(GTK_LABEL(w->stats_label), TRUE);
-	gtk_box_pack_start(GTK_BOX(stats_panel), w->stats_label, FALSE, FALSE, 0);
+	gtk_label_set_justify(GTK_LABEL(w->stats_label), GTK_JUSTIFY_CENTER);
+	PangoAttrList *attrs = pango_attr_list_new();
+	PangoAttribute *size_attr = pango_attr_size_new(24 * 1024);
+	pango_attr_list_insert(attrs, size_attr);
+	gtk_label_set_attributes(GTK_LABEL(w->stats_label), attrs);
+	pango_attr_list_unref(attrs);
+
+	gtk_box_pack_start(GTK_BOX(stats_panel), w->stats_label, TRUE, TRUE, 20);
 	gtk_widget_show_all(stats_panel);
 	GtkWidget *stats_tab_label = gtk_label_new("Stats");
 	gtk_notebook_append_page(GTK_NOTEBOOK(w->notebook), stats_panel, stats_tab_label);
