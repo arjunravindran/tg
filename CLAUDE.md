@@ -63,6 +63,17 @@ Binary file format for saving/loading snapshots. Tested by `tests/test_serialize
 `algo_classic = 0` → Improved (default); `algo_classic = 1` → Classic (pre-0.8).  
 The flag is mirrored on `processing_buffers`, `calibration_data`, `processing_data`, `computer`, and `main_window`. Changing it triggers a full computer restart.
 
+## Features
+
+### Measurement Alerts
+Min/max rate bounds in toolbar flag out-of-range measurements. Visual indicator shows `✓` (in bounds) or `⚠` (alert). Bounds persist to config as `alert_min_rate`, `alert_max_rate`, `alerts_enabled`.
+
+### Real-Time Statistics
+**Stats** tab displays rolling mean and σ over last 50 measurements for rate (s/day) and beat error (ms). Calculates in `update_stats_display()`, updates each refresh cycle.
+
+### Session Auto-Save
+Background timer (5 min interval, `300000` ms) auto-captures snapshots via `autosave_timer()`. Keeps max 10 per session; removes oldest when exceeded. Snapshots auto-named with timestamp.
+
 ## Windows-Specific Notes
 
 - All runtime DLLs (libgtk, libcairo, libportaudio, etc.) live in the repo root alongside `tg-timer.exe`
